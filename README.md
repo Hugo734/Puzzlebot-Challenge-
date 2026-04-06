@@ -18,7 +18,7 @@ source install/setup.bash
 
 ### Demo
 
-<video src="assets/week1.webm" controls width="700"></video>
+<video src="assets/week1.mp4" controls width="700"></video>
 
 ### Launch
 
