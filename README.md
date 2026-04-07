@@ -18,7 +18,7 @@ source install/setup.bash
 
 ### Demo
 
-<video src="assets/week1.mp4" controls width="700"></video>
+<img src="assets/img.png" width="49%"/> <img src="assets/img1.png" width="49%"/>
 
 ### Launch
 
