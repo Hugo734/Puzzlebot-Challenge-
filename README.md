@@ -33,18 +33,3 @@ ros2 launch puzzlebot_description week1.launch.py
 | `robot_state_publisher` | Loads the URDF and publishes the robot TF tree |
 | `circular_motion.py` | Moves the robot in a circle (radius 0.5 m) and spins the wheels |
 | `rviz2` | Visualizes the robot with `odom` as the fixed frame |
-
-### Tuning the motion
-
-Edit `scripts/circular_motion.py` and adjust the parameters at the top of `__init__`:
-
-```python
-self.radius = 0.5   # circle radius in metres
-self.omega  = 0.5   # angular velocity in rad/s
-```
-
-Rebuild after any change:
-
-```bash
-colcon build --packages-select puzzlebot_description && source install/setup.bash
-```
