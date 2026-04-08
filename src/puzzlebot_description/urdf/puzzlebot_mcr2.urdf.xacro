@@ -145,14 +145,6 @@
     </inertial>
   </link>
 
-  <!-- IMU link -->
-  <link name="imu_link">
-    <inertial>
-      <mass value="0.01"/>
-      <inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/>
-    </inertial>
-  </link>
-
   <!-- ==================== JOINTS ==================== -->
 
   <!-- base_footprint -> base_link -->
@@ -197,13 +189,6 @@
     <parent link="base_link"/>
     <child link="camera_link"/>
     <origin xyz="0.112 0 0.065" rpy="0 0 0"/>
-  </joint>
-
-  <!-- base_link -> imu_link -->
-  <joint name="imu_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="imu_link"/>
-    <origin xyz="0.0 0.0 0.04" rpy="0.0 0.0 0.0"/>
   </joint>
 
   <!-- Materials -->
