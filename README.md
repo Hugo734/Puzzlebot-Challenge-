@@ -7,7 +7,63 @@ Spawns the MCR2 Puzzlebot (Jetson + Lidar edition) in RViz. The robot automatica
 
 ### Requirements
 
-Make sure the workspace is built and sourced:
+#### System dependencies (ROS 2 Humble on Ubuntu 22.04)
+
+Core ROS 2 tools and robot description utilities:
+
+```bash
+sudo apt-get install -y \
+  ros-humble-robot-state-publisher \
+  ros-humble-joint-state-publisher \
+  ros-humble-joint-state-publisher-gui \
+  ros-humble-rviz2 \
+  ros-humble-xacro \
+  ros-humble-tf2-ros \
+  ros-humble-teleop-twist-keyboard
+```
+
+Gazebo (Ignition Fortress) + ROS 2 bridge:
+
+```bash
+sudo apt-get install -y \
+  ros-humble-ros-gz-sim \
+  ros-humble-ros-gz-bridge \
+  ros-humble-ros-gz-interfaces
+```
+
+ros2_control and controllers:
+
+```bash
+sudo apt-get install -y \
+  ros-humble-ros2-control \
+  ros-humble-ros2-controllers \
+  ros-humble-controller-manager \
+  ros-humble-ign-ros2-control
+```
+
+Joystick / teleoperation / mux:
+
+```bash
+sudo apt-get install -y \
+  ros-humble-joy \
+  ros-humble-joy-teleop \
+  ros-humble-twist-mux
+```
+
+<!-- SLAM toolbox (used by `puzzlebot_mapping`):
+
+```bash
+sudo apt-get install -y \
+  ros-humble-slam-toolbox
+``` -->
+
+Python dependencies:
+
+```bash
+pip install numpy scipy
+```
+
+#### Build and source the workspace
 
 ```bash
 git clone https://github.com/Hugo734/Puzzlebot-Challenge-.git
