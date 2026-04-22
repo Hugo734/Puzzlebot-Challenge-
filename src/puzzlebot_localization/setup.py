@@ -28,6 +28,9 @@ setup(
     license='TODO',
     entry_points={
         'console_scripts': [
+            'kinematic_simulator = puzzlebot_localization.kinematic_simulator:main',
+            'dead_reckoning     = puzzlebot_localization.dead_reckoning:main',
+            'tf_broadcaster     = puzzlebot_localization.tf_broadcaster:main',
             'mcl_node = puzzlebot_localization.mcl_node:main',
         ],
     },
