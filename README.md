@@ -7,7 +7,24 @@ Spawns the MCR2 Puzzlebot (Jetson + Lidar edition) in RViz. The robot automatica
 
 ### Requirements
 
-#### System dependencies (ROS 2 Humble on Ubuntu 22.04)
+#### Option 1: Docker (Recommended)
+
+Build the Docker image:
+
+```bash
+docker build -t puzzlebot -f .devcontainer/Dockerfile .
+```
+
+Run the container:
+
+```bash
+docker run -it --rm --gpus all --network host \
+  -e DISPLAY=$DISPLAY \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  puzzlebot bash
+```
+
+#### Option 2: System dependencies (ROS 2 Humble on Ubuntu 22.04)
 
 Core ROS 2 tools and robot description utilities:
 
