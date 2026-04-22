@@ -1,0 +1,13 @@
+kinematic_simulator:
+  ros__parameters:
+    wheel_radius: 0.05          # r [m]
+    wheel_separation: 0.19      # L [m]
+
+dead_reckoning:
+  ros__parameters:
+    wheel_radius: 0.05
+    wheel_separation: 0.19
+    update_rate: 20.0           # Hz  (dt = 0.05 s)
+
+tf_broadcaster:
+  ros__parameters: {}

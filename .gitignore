@@ -2,3 +2,9 @@ build/
 log/
 install/
 src/puzzlebot_week2/
+.devcontainer/
+odom_square/
+src/lpc_codebook_training/
+docs/
+.dockerignore
+*.pyc
