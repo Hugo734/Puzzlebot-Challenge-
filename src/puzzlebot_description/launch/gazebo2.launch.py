@@ -44,6 +44,10 @@ def generate_launch_description():
         "IGN_GAZEBO_RESOURCE_PATH",
         model_path
     )
+    gl_always_software = SetEnvironmentVariable(
+        "LIBGL_ALWAYS_SOFTWARE",
+        "1"
+    )
 
     ros_distro = os.environ["ROS_DISTRO"]
     is_ignition = "True" if ros_distro == "humble" else "False"
@@ -102,6 +106,7 @@ def generate_launch_description():
         world_name_arg,
         gz_resource_path,
         ign_resource_path,
+        gl_always_software,
         robot_state_publisher_node,
         gazebo,
         gz_spawn_entity,
