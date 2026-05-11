@@ -1,0 +1,44 @@
+waypoints:
+  # ── Trucks (loading / unloading docks) ───────────────────────────────
+  truck_1:
+    x: 1.50
+    y: 0.50
+    theta: 0.00
+
+  truck_2:
+    x: 1.50
+    y: 1.50
+    theta: 0.00
+
+  truck_3:
+    x: 1.50
+    y: 2.50
+    theta: 0.00
+
+  # ── Rack approach positions (facing rack, theta ≈ 90°) ───────────────
+  rack_1_front:
+    x: 0.80
+    y: 0.50
+    theta: 1.57
+
+  rack_2_front:
+    x: 0.80
+    y: 1.50
+    theta: 1.57
+
+  # ── Roller staging tables ─────────────────────────────────────────────
+  roller_1:
+    x: 2.00
+    y: 1.00
+    theta: 3.14
+
+  roller_2:
+    x: 2.00
+    y: 2.00
+    theta: 3.14
+
+  # ── Home / charging position ──────────────────────────────────────────
+  home:
+    x: 0.00
+    y: 0.00
+    theta: 0.00

@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AMR Warehouse Robot Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+</head>
+<body>
+
+  <!-- ================================================================
+       HEADER
+       ================================================================ -->
+  <header class="header">
+    <div class="header-brand">
+      <span class="header-icon">&#9651;</span>
+      <div>
+        <h1 class="header-title">AMR Warehouse Robot</h1>
+        <p class="header-sub">Autonomous Mobile Robot — Puzzlebot AMR</p>
+      </div>
+    </div>
+    <div class="header-status">
+      <span class="conn-dot" id="connDot"></span>
+      <span class="conn-label" id="connLabel">Connecting…</span>
+    </div>
+  </header>
+
+  <!-- ================================================================
+       MAIN GRID
+       ================================================================ -->
+  <main class="grid">
+
+    <!-- ============================================================
+         LEFT PANEL — Telemetry
+         ============================================================ -->
+    <aside class="panel panel-left">
+
+      <!-- Robot State -->
+      <section class="card">
+        <h2 class="card-title">Robot State</h2>
+        <div class="state-badge" id="stateBadge">UNKNOWN</div>
+      </section>
+
+      <!-- Mission Info -->
+      <section class="card">
+        <h2 class="card-title">Current Mission</h2>
+        <div id="missionBox" class="mission-box">
+          <p class="dim">No active mission</p>
+        </div>
+      </section>
+
+      <!-- Pose -->
+      <section class="card">
+        <h2 class="card-title">Pose</h2>
+        <div class="tele-grid">
+          <span class="tele-label">X</span>
+          <span class="tele-val mono" id="poseX">0.000 m</span>
+          <span class="tele-label">Y</span>
+          <span class="tele-val mono" id="poseY">0.000 m</span>
+          <span class="tele-label">&theta;</span>
+          <span class="tele-val mono" id="poseTheta">0.0000 rad</span>
+        </div>
+      </section>
+
+      <!-- Velocity -->
+      <section class="card">
+        <h2 class="card-title">Velocity</h2>
+        <div class="vel-row">
+          <span class="tele-label">Linear</span>
+          <div class="vel-bar-wrap">
+            <div class="vel-bar vel-bar-linear" id="barLinear"></div>
+          </div>
+          <span class="tele-val mono" id="velLinear">0.000 m/s</span>
+        </div>
+        <div class="vel-row">
+          <span class="tele-label">Angular</span>
+          <div class="vel-bar-wrap">
+            <div class="vel-bar vel-bar-angular" id="barAngular"></div>
+          </div>
+          <span class="tele-val mono" id="velAngular">0.000 rad/s</span>
+        </div>
+      </section>
+
+      <!-- Lifter -->
+      <section class="card">
+        <h2 class="card-title">Lifter Level</h2>
+        <div class="lifter-wrap">
+          <div class="lifter-column" id="lifterColumn">
+            <!-- 8 segments rendered from JS (7 down to 0) -->
+          </div>
+          <div class="lifter-labels">
+            <span>7</span><span>6</span><span>5</span><span>4</span>
+            <span>3</span><span>2</span><span>1</span><span>0</span>
+          </div>
+        </div>
+        <p class="lifter-text">Level: <span class="mono accent" id="lifterText">0</span></p>
+      </section>
+
+    </aside>
+
+    <!-- ============================================================
+         CENTER PANEL — Camera + Map
+         ============================================================ -->
+    <section class="panel panel-center">
+
+      <section class="card feed-card">
+        <h2 class="card-title">Live Camera Feed</h2>
+        <div class="feed-wrap">
+          <img
+            id="cameraFeed"
+            class="feed-img"
+            src="/video_feed"
+            alt="Live camera feed"
+            onerror="this.src='/video_feed'"
+          />
+        </div>
+      </section>
+
+      <section class="card feed-card">
+        <h2 class="card-title">Occupancy Map</h2>
+        <div class="feed-wrap map-wrap">
+          <img
+            id="mapImg"
+            class="feed-img map-img"
+            src="/api/map"
+            alt="Occupancy grid map"
+          />
+          <div id="mapNoData" class="map-no-data">
+            Waiting for map data…
+          </div>
+          <!-- Robot pose indicator overlay -->
+          <canvas id="mapOverlay" class="map-overlay"></canvas>
+        </div>
+      </section>
+
+    </section>
+
+    <!-- ============================================================
+         RIGHT PANEL — Mission Control
+         ============================================================ -->
+    <aside class="panel panel-right">
+
+      <section class="card">
+        <h2 class="card-title">Send Mission</h2>
+
+        <form id="missionForm" class="mission-form" autocomplete="off">
+
+          <label class="form-label" for="palletId">Pallet ID</label>
+          <input
+            id="palletId"
+            class="form-input"
+            type="text"
+            placeholder="e.g. P001"
+            required
+          />
+
+          <label class="form-label" for="sourceSelect">Source Location</label>
+          <select id="sourceSelect" class="form-select" required>
+            <option value="">— select source —</option>
+            <optgroup label="Trucks">
+              <option value="truck_1">Truck 1</option>
+              <option value="truck_2">Truck 2</option>
+              <option value="truck_3">Truck 3</option>
+            </optgroup>
+            <optgroup label="Racks">
+              <option value="rack_1">Rack 1</option>
+              <option value="rack_2">Rack 2</option>
+            </optgroup>
+            <optgroup label="Rollers">
+              <option value="roller_1">Roller 1</option>
+              <option value="roller_2">Roller 2</option>
+            </optgroup>
+          </select>
+
+          <label class="form-label" for="sourceLevelSelect">Source Level</label>
+          <select id="sourceLevelSelect" class="form-select" required>
+            <option value="">— select level —</option>
+            <option value="1">1 — Floor</option>
+            <option value="2">2 — Rack level 2</option>
+            <option value="3">3 — Truck</option>
+          </select>
+
+          <label class="form-label" for="destSelect">Destination</label>
+          <select id="destSelect" class="form-select" required>
+            <option value="">— select destination —</option>
+            <optgroup label="Trucks">
+              <option value="truck_1">Truck 1</option>
+              <option value="truck_2">Truck 2</option>
+              <option value="truck_3">Truck 3</option>
+            </optgroup>
+            <optgroup label="Racks">
+              <option value="rack_1">Rack 1</option>
+              <option value="rack_2">Rack 2</option>
+            </optgroup>
+            <optgroup label="Rollers">
+              <option value="roller_1">Roller 1</option>
+              <option value="roller_2">Roller 2</option>
+            </optgroup>
+          </select>
+
+          <button class="btn-submit" type="submit">
+            &#9654; Send Mission
+          </button>
+
+        </form>
+
+        <!-- Toast notification -->
+        <div id="toast" class="toast hidden"></div>
+      </section>
+
+      <!-- Mission History -->
+      <section class="card">
+        <h2 class="card-title">Mission History</h2>
+        <ul class="history-list" id="historyList">
+          <li class="dim">No missions sent yet</li>
+        </ul>
+      </section>
+
+      <!-- Quick Stats -->
+      <section class="card">
+        <h2 class="card-title">Session Stats</h2>
+        <div class="tele-grid">
+          <span class="tele-label">Missions sent</span>
+          <span class="tele-val mono accent" id="statMissions">0</span>
+          <span class="tele-label">Uptime</span>
+          <span class="tele-val mono" id="statUptime">00:00:00</span>
+          <span class="tele-label">WS events</span>
+          <span class="tele-val mono" id="statEvents">0</span>
+        </div>
+      </section>
+
+    </aside>
+  </main>
+
+  <!-- ================================================================
+       FOOTER
+       ================================================================ -->
+  <footer class="footer">
+    <span>Puzzlebot AMR &mdash; TE3003B FJ2026 &mdash; ITESM</span>
+    <span>
+      <span class="conn-dot" id="footerDot"></span>
+      <span id="footerLabel">Connecting…</span>
+    </span>
+  </footer>
+
+  <script src="/static/main.js"></script>
+</body>
+</html>

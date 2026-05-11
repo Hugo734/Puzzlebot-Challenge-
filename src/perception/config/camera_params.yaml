@@ -1,0 +1,9 @@
+camera:
+  image_width: 640
+  image_height: 480
+  # Row-major 3x3 intrinsic matrix [fx, 0, cx, 0, fy, cy, 0, 0, 1]
+  camera_matrix: [500.0, 0.0, 320.0, 0.0, 500.0, 240.0, 0.0, 0.0, 1.0]
+  # Distortion coefficients [k1, k2, p1, p2, k3]
+  distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+  # Physical side length of ArUco markers in metres
+  marker_length: 0.05

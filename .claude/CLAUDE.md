@@ -38,15 +38,15 @@ No usar Nav2. Toda la navegación, SLAM y control es implementación propia.
 
 ---
 
-## Paquetes existentes
+## Paquetes existentes (renombrar — quitar prefijo `puzzlebot_`)
 
-| Paquete | Lenguaje | Estado | Propósito |
+| Nombre actual (en disco) | Nombre objetivo | Lenguaje | Propósito |
 |---|---|---|---|
-| `puzzlebot_bringup` | CMake | ✅ Listo | Launch files del robot |
-| `puzzlebot_controller` | Python | ✅ Listo | Cinemática diferencial, odometría, TF |
-| `puzzlebot_description` | CMake/URDF | ✅ Listo | Modelo URDF del Puzzlebot |
-| `puzzlebot_localization_cpp` | C++ | ✅ Listo | EKF + ICP 2D para localización |
-| `puzzlebot_slam` | Python | ✅ Listo | SLAM con ICP + OccupancyGrid |
+| `puzzlebot_bringup` | `bringup` | CMake | Launch files del robot |
+| `puzzlebot_controller` | `controller` | Python | Cinemática diferencial, odometría, TF |
+| `puzzlebot_description` | `description` | CMake/URDF | Modelo URDF + mundos Gazebo |
+| `puzzlebot_localization_cpp` | `localization` | C++ | EKF + ICP 2D para localización |
+| `puzzlebot_slam` | `slam` | Python | SLAM con ICP + OccupancyGrid |
 
 ---
 
@@ -54,12 +54,12 @@ No usar Nav2. Toda la navegación, SLAM y control es implementación propia.
 
 | Paquete | Lenguaje | Propósito |
 |---|---|---|
-| `puzzlebot_navigation` | Python | A* + Bug algorithm + PID seguidor de trayectoria |
-| `puzzlebot_state_machine` | Python (YASMIN) | Máquina de estados del AMR |
-| `puzzlebot_vision` | Python | Detección Aruco, CNN tráiler, alineación PID con pallet |
-| `puzzlebot_lifter` | Python | Control GPIO → FPGA (Jetson.GPIO, 3 bits) |
-| `puzzlebot_voice` | Python | Reconocimiento de voz LPC + VQ, parser de comandos |
-| `puzzlebot_web` | Python/Flask | Interfaz web con telemetría, streaming y estado de misiones |
+| `navigation` | Python | A* + Bug1 + PID seguidor de trayectoria |
+| `mission_control` | Python (YASMIN) | Máquina de estados del AMR |
+| `perception` | Python | Aruco, CNN tráiler, alineación PID con pallet |
+| `lifting` | Python | HAL GPIO → FPGA (Jetson.GPIO, 3 bits) + mock para sim |
+| `voice_control` | Python | Reconocimiento de voz LPC + VQ, parser de comandos |
+| `dashboard` | Python/Flask | Interfaz web con telemetría, streaming y estado de misiones |
 
 ---
 

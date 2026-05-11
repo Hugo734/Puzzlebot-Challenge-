@@ -1,0 +1,28 @@
+navigation_node:
+  ros__parameters:
+    # Distance (m) to declare the final goal reached
+    goal_tolerance: 0.10
+    # Distance (m) to advance past intermediate waypoints
+    waypoint_tolerance: 0.15
+    # Obstacle inflation radius for A* grid (m)
+    inflation_radius: 0.15
+    # Maximum forward speed (m/s)
+    max_linear_vel: 0.3
+    # Maximum rotational speed (rad/s)
+    max_angular_vel: 1.0
+    # PID gains for heading error → angular velocity
+    kp_angular: 1.5
+    ki_angular: 0.0
+    kd_angular: 0.1
+    # Proportional gain for distance → linear velocity
+    kp_linear: 0.5
+    # Bug1: distance (m) at which a scan reading is classified as an obstacle
+    obstacle_threshold: 0.4
+    # Bug1: half-angle (deg) of the forward obstacle-detection cone (±30° = 60° total)
+    obstacle_front_angle_deg: 30.0
+    # Bug1: desired gap (m) between robot and wall during circumnavigation
+    wall_follow_distance: 0.3
+    # Control loop rate (Hz)
+    control_frequency: 10.0
+    # Time (s) without positional progress before declaring STUCK
+    stuck_timeout: 10.0

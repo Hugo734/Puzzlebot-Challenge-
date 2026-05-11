@@ -1,48 +1,119 @@
-# Plan de Implementación — Puzzlebot AMR Montacargas
+# Plan de Implementación — AMR Montacargas
 
-**Reto:** TE3003B · ITESM Campus Monterrey · FJ2026  
-**Robot:** Puzzlebot (diferencial) con lifter tipo montacargas controlado por FPGA  
+**Reto:** TE3003B · ITESM FJ2026  
+**Robot:** Diferencial con lifter tipo montacargas, controlado por FPGA  
+**Misión:** Mover pallets entre camiones, racks y rollers en almacén a escala
 
 ---
 
-## Estructura final del repositorio
+## Estructura del repositorio
 
 ```
 src/
-├── puzzlebot_bringup/              ✅ Existente — launch del robot
-├── puzzlebot_controller/           ✅ Existente — cinemática diferencial + odometría
-├── puzzlebot_description/          ✅ Existente — URDF
-├── puzzlebot_localization_cpp/     ✅ Existente — EKF C++ + ICP 2D
-├── puzzlebot_slam/                 ✅ Existente — SLAM ICP + OccupancyGrid Python
+├── bringup/            ✅ Renombrar desde puzzlebot_bringup   — launch files del sistema
+├── controller/         ✅ Renombrar desde puzzlebot_controller — cinemática diferencial + odometría
+├── description/        ✅ Renombrar desde puzzlebot_description — URDF + mundos Gazebo
+├── localization/       ✅ Renombrar desde puzzlebot_localization_cpp — EKF C++ + ICP 2D
+├── slam/               ✅ Renombrar desde puzzlebot_slam       — SLAM ICP + OccupancyGrid
 │
-├── puzzlebot_navigation/           🔨 Crear
-├── puzzlebot_state_machine/        🔨 Crear
-├── puzzlebot_vision/               🔨 Crear
-├── puzzlebot_lifter/               🔨 Crear
-├── puzzlebot_voice/                🔨 Crear
-└── puzzlebot_web/                  🔨 Crear
+├── navigation/         🔨 Crear — A* + Bug1 + PID path follower
+├── mission_control/    🔨 Crear — máquina de estados YASMIN
+├── perception/         🔨 Crear — Aruco, CNN tráiler, alineación PID
+├── lifting/            🔨 Crear — GPIO → FPGA (real) | mock (simulación)
+├── voice_control/      🔨 Crear — LPC + VQ, parser de comandos
+└── dashboard/          🔨 Crear — Flask web: telemetría + streaming + misiones
+```
+
+> **Screaming architecture:** el árbol de `src/` grita lo que hace el robot —
+> navega, percibe, levanta, escucha y reporta. Sin prefijo `puzzlebot_` redundante.
+
+---
+
+## Sim vs Real
+
+Toda la pila soporta dos modos. El argumento `sim:=true/false` en el launch raíz
+controla qué implementación de hardware se carga.
+
+```bash
+ros2 launch bringup full.launch.py sim:=true    # Gazebo
+ros2 launch bringup full.launch.py sim:=false   # Jetson Nano + hardware real
+```
+
+### Hardware Abstraction Layer (HAL)
+
+Los paquetes que tocan hardware exponen una interfaz Python común y cargan
+la implementación según el parámetro ROS `use_sim_time`:
+
+```
+lifting/
+└── lifting/
+    ├── hal/
+    │   ├── base.py          # interfaz abstracta GpioDriver
+    │   ├── jetson.py        # Jetson.GPIO — solo carga en hardware real
+    │   └── mock.py          # logging únicamente — carga en simulación
+    └── lifting_node.py      # selecciona hal/ según use_sim_time
+
+perception/
+└── perception/
+    ├── hal/
+    │   ├── base.py          # interfaz abstracta CameraSource
+    │   ├── ros_camera.py    # suscribe /cam_img (real o Gazebo, mismo topic)
+    │   └── mock_camera.py   # genera imágenes sintéticas para pruebas unitarias
+    └── ...
+```
+
+### Modos por paquete
+
+| Paquete | Sim | Real |
+|---|---|---|
+| `controller` | Gazebo differential drive plugin | H-bridge + encoders físicos |
+| `localization` | Odom de Gazebo como ground-truth | EKF con encoders reales |
+| `slam` | Gazebo LiDAR plugin (`/scan`) | LiDAR físico |
+| `navigation` | Misma lógica, mapa del SLAM sim | Mapa pre-guardado real |
+| `perception` | Cámara Gazebo (`/cam_img`) | Cámara USB |
+| `lifting` | `hal/mock.py` (no GPIO) | `hal/jetson.py` + FPGA |
+| `voice_control` | Archivos .wav de prueba | Micrófono USB en Jetson |
+| `dashboard` | Igual — consume topics ROS2 | Igual |
+
+---
+
+## Paquetes existentes — limpieza
+
+Antes de crear los nuevos, renombrar:
+
+```bash
+# En src/
+mv puzzlebot_bringup          bringup
+mv puzzlebot_controller       controller
+mv puzzlebot_description      description
+mv puzzlebot_localization_cpp localization
+mv puzzlebot_slam              slam
+
+# Actualizar en cada package.xml: <name>puzzlebot_X</name> → <name>X</name>
+# Actualizar referencias en CMakeLists.txt y setup.py/setup.cfg
+# Actualizar imports internos en archivos Python
 ```
 
 ---
 
-## Módulo 1 — `puzzlebot_navigation`
+## Módulo 1 — `navigation`
 
 **Evaluable:** MR Navegación (5%)  
 **Responsabilidad:** Llevar el robot de su pose actual a un waypoint, evadiendo obstáculos.
 
-### Archivos
+### Estructura
 
 ```
-puzzlebot_navigation/
-├── puzzlebot_navigation/
+navigation/
+├── navigation/
 │   ├── __init__.py
-│   ├── astar.py               # Algoritmo A* puro (sin ROS)
-│   ├── bug1.py                # Bug1 algorithm para evasión reactiva
-│   ├── path_follower.py       # PID de seguimiento: error de heading → cmd_vel
-│   └── navigation_node.py    # Nodo ROS2: subscribe /robot_pose + /map, publica /cmd_vel
+│   ├── astar.py               # A* puro sobre OccupancyGrid (sin ROS, testeable)
+│   ├── bug1.py                # Bug1 reactivo: contornea obstáculo y retoma ruta
+│   ├── path_follower.py       # PID heading + velocidad lineal → /cmd_vel
+│   └── navigation_node.py    # Nodo ROS2: orquesta A* → follower → Bug1
 ├── config/
-│   ├── nav_params.yaml        # Tolerancias, velocidades, PID gains
-│   └── waypoints.yaml         # Poses fijas de cada zona (camiones, racks, rollers)
+│   ├── nav_params.yaml        # Tolerancias, PID gains, velocidades máx
+│   └── waypoints.yaml         # Poses fijas de cada zona
 ├── launch/
 │   └── navigation.launch.py
 ├── package.xml
@@ -50,115 +121,121 @@ puzzlebot_navigation/
 └── setup.cfg
 ```
 
-### Interfaces
+### Topics
 
 | Topic | Tipo | Rol |
 |---|---|---|
-| `/robot_pose` | `PoseStamped` | Entrada — pose actual del robot |
+| `/robot_pose` | `PoseStamped` | Entrada — pose actual (EKF) |
 | `/map` | `OccupancyGrid` | Entrada — mapa para A* |
 | `/scan` | `LaserScan` | Entrada — obstáculos para Bug1 |
 | `/cmd_vel` | `Twist` | Salida — velocidades |
-| `/navigation/goal` | `PoseStamped` | Entrada — destino solicitado por SM |
-| `/navigation/status` | `String` | Salida — `NAVIGATING`, `ARRIVED`, `STUCK` |
+| `/navigation/goal` | `PoseStamped` | Entrada — destino pedido por mission_control |
+| `/navigation/status` | `String` | Salida — `NAVIGATING` · `ARRIVED` · `STUCK` |
 
 ### Lógica
 
-1. SM publica goal en `/navigation/goal`
-2. A* planifica sobre el OccupancyGrid inflado (inflation layer manual)
-3. PID sigue la ruta waypoint a waypoint (pure pursuit simplificado)
-4. Si LiDAR detecta obstáculo no mapeado → Bug1 toma control
-5. Bug1 sigue el contorno del obstáculo hasta retomar la ruta A*
-6. Al llegar (error < tolerancia) publica `ARRIVED`
+```
+mission_control publica /navigation/goal
+    ↓
+A* planifica sobre OccupancyGrid inflado (inflation_radius configurable)
+    ↓
+PID sigue ruta waypoint a waypoint (pure pursuit simplificado)
+    ↓
+LiDAR detecta obstáculo no mapeado → Bug1 toma control
+    ↓
+Bug1 contornea obstáculo → retoma ruta A*
+    ↓
+|error_pose| < tolerance → publica ARRIVED
+```
 
-### `waypoints.yaml` (estructura)
+### `waypoints.yaml`
 
 ```yaml
 waypoints:
-  truck_1:    {x: 1.50, y: 0.50, theta: 0.00}
-  truck_2:    {x: 1.50, y: 1.50, theta: 0.00}
-  truck_3:    {x: 1.50, y: 2.50, theta: 0.00}
-  rack_1:     {x: 0.50, y: 0.50, theta: 1.57}
-  rack_2:     {x: 0.50, y: 1.50, theta: 1.57}
-  roller_1:   {x: 2.00, y: 1.00, theta: 3.14}
-  roller_2:   {x: 2.00, y: 2.00, theta: 3.14}
+  truck_1:  {x: 1.50, y: 0.50, theta: 0.00}
+  truck_2:  {x: 1.50, y: 1.50, theta: 0.00}
+  truck_3:  {x: 1.50, y: 2.50, theta: 0.00}
+  rack_1:   {x: 0.50, y: 0.50, theta: 1.57}
+  rack_2:   {x: 0.50, y: 1.50, theta: 1.57}
+  roller_1: {x: 2.00, y: 1.00, theta: 3.14}
+  roller_2: {x: 2.00, y: 2.00, theta: 3.14}
 ```
 
 ---
 
-## Módulo 2 — `puzzlebot_state_machine`
+## Módulo 2 — `mission_control`
 
 **Evaluable:** Integración general del reto  
-**Librería:** [YASMIN](https://github.com/uleroboticsgroup/yasmin) — diseñada para ROS2 Python
+**Librería:** [YASMIN](https://github.com/uleroboticsgroup/yasmin)
 
-### Archivos
+### Estructura
 
 ```
-puzzlebot_state_machine/
-├── puzzlebot_state_machine/
+mission_control/
+├── mission_control/
 │   ├── __init__.py
 │   ├── states/
-│   │   ├── waiting_command.py      # Espera misión de web o voz
-│   │   ├── navigating.py           # Publica goal a navigation, espera ARRIVED
-│   │   ├── aligning.py             # PID visual, espera aligned de vision
-│   │   ├── picking_lower.py        # Lifter nivel 3, avanza, recoge pallet de piso
-│   │   ├── picking_upper.py        # Lifter nivel 5, recoge pallet de rack nivel 2
-│   │   ├── picking_from_truck.py   # Secuencia específica para recoger desde camión
-│   │   └── placing_pallet.py       # Baja lifter, deposita pallet, retrocede
-│   ├── mission_parser.py           # Convierte string JSON de misión a goals concretos
-│   └── state_machine_node.py      # Construye y corre la SM con YASMIN
+│   │   ├── waiting_command.py       # Espera misión de dashboard o voice_control
+│   │   ├── navigating.py            # Publica goal → espera ARRIVED
+│   │   ├── aligning.py              # PID visual, espera aligned
+│   │   ├── picking_floor.py         # Lifter nivel 3 — pallet de piso
+│   │   ├── picking_rack.py          # Lifter nivel 5 — rack nivel 2
+│   │   ├── picking_truck.py         # Secuencia específica para camión
+│   │   └── placing_pallet.py        # Baja lifter, deposita, retrocede
+│   ├── mission_parser.py            # JSON → goals concretos
+│   └── state_machine_node.py       # Construye y corre SM con YASMIN
 ├── config/
 │   └── sm_params.yaml
 ├── launch/
-│   └── state_machine.launch.py
+│   └── mission_control.launch.py
 ├── package.xml
 ├── setup.py
 └── setup.cfg
 ```
 
-### Diagrama de transiciones
+### Diagrama de estados
 
 ```
-                    ┌─────────────────────┐
-                    │   WAITING_COMMAND   │◄──────────────────────┐
-                    └────────┬────────────┘                       │
-                    [mission_received]                            │
-                             ↓                                    │
-                    ┌─────────────────────┐                       │
-                    │  NAVIGATING_SOURCE  │ ──[stuck]──► ERROR    │
-                    └────────┬────────────┘                       │
-                         [arrived]                                │
-                             ↓                                    │
-                    ┌─────────────────────┐                       │
-                    │  ALIGNING_TO_PALLET │                       │
-                    └────────┬────────────┘                       │
-                         [aligned]                                │
-                             ↓                                    │
-               ┌─────────────┴──────────────┐                    │
-               ▼                            ▼                    │
-       [rack nivel 1]              [rack nivel 2 / camión]       │
-    PICKING_LOWER              PICKING_UPPER / PICKING_FROM_TRUCK│
-               └─────────────┬──────────────┘                    │
-                          [picked]                                │
-                             ↓                                    │
-                    ┌─────────────────────┐                       │
-                    │   NAVIGATING_DEST   │                       │
-                    └────────┬────────────┘                       │
-                         [arrived]                                │
-                             ↓                                    │
-                    ┌─────────────────────┐                       │
-                    │   ALIGNING_TO_DEST  │                       │
-                    └────────┬────────────┘                       │
-                         [aligned]                                │
-                             ↓                                    │
-                    ┌─────────────────────┐                       │
-                    │   PLACING_PALLET    │ ──────────────────────┘
-                    └─────────────────────┘
-                    
+                   ┌────────────────────┐
+                   │  WAITING_COMMAND   │◄─────────────────────┐
+                   └───────┬────────────┘                      │
+                   [mission_received]                          │
+                            ↓                                  │
+                   ┌────────────────────┐                      │
+                   │  NAVIGATING_SOURCE │──[stuck]──► ERROR    │
+                   └───────┬────────────┘                      │
+                        [arrived]                              │
+                            ↓                                  │
+                   ┌────────────────────┐                      │
+                   │  ALIGNING_TO_PALLET│                      │
+                   └───────┬────────────┘                      │
+                        [aligned]                              │
+                            ↓                                  │
+          ┌─────────────────┴──────────────────┐               │
+          ▼                 ▼                  ▼               │
+   PICKING_FLOOR      PICKING_RACK      PICKING_TRUCK          │
+          └─────────────────┬──────────────────┘               │
+                        [picked]                               │
+                            ↓                                  │
+                   ┌────────────────────┐                      │
+                   │  NAVIGATING_DEST   │                      │
+                   └───────┬────────────┘                      │
+                        [arrived]                              │
+                            ↓                                  │
+                   ┌────────────────────┐                      │
+                   │  ALIGNING_TO_DEST  │                      │
+                   └───────┬────────────┘                      │
+                        [aligned]                              │
+                            ↓                                  │
+                   ┌────────────────────┐                      │
+                   │  PLACING_PALLET    │──────────────────────┘
+                   └────────────────────┘
+
 Cualquier estado → [pause_cmd] → PAUSED → [resume_cmd] → estado anterior
 Cualquier estado → [stop_cmd]  → WAITING_COMMAND
 ```
 
-### Formato de misión
+### Formato de misión (JSON)
 
 ```json
 {
@@ -171,131 +248,138 @@ Cualquier estado → [stop_cmd]  → WAITING_COMMAND
 
 ---
 
-## Módulo 3 — `puzzlebot_vision`
+## Módulo 3 — `perception`
 
 **Evaluables:** MR Detección Aruco (5%), E80 Detección + alineación (5%)
 
-### Archivos
+### Estructura
 
 ```
-puzzlebot_vision/
-├── puzzlebot_vision/
+perception/
+├── perception/
 │   ├── __init__.py
-│   ├── aruco_detector.py      # Detecta markers, publica ID + pose 3D → /aruco_poses
-│   ├── trailer_detector.py    # CNN/YOLO para detectar tráiler → /trailer_detection
-│   ├── pallet_detector.py     # HSV color mask + contornos → /pallet_detection
-│   └── alignment_node.py     # PID visual: error centroide → /alignment_error + /cmd_vel
+│   ├── hal/
+│   │   ├── base.py              # CameraSource abstracta
+│   │   ├── ros_camera.py        # Suscribe /cam_img (real + Gazebo)
+│   │   └── mock_camera.py       # Genera frames sintéticos para tests
+│   ├── aruco_detector.py        # cv2.aruco → PoseArray /aruco_poses
+│   ├── trailer_detector.py      # CNN/YOLO → BoundingBox2D /trailer_detection
+│   ├── pallet_detector.py       # HSV mask + contornos → /pallet_detection
+│   └── alignment_node.py        # PID visual: centroide → /cmd_vel + /alignment_error
 ├── models/
-│   └── trailer_model.pt       # Modelo entrenado YOLO/MobileNet para tráiler
+│   └── trailer_model.pt         # Modelo entrenado (MobileNet/YOLO)
 ├── config/
-│   ├── camera_params.yaml     # Matriz intrínseca K, distorsión D
-│   └── vision_params.yaml     # HSV ranges, PID gains alineación
+│   ├── camera_params.yaml        # Matriz K, distorsión D
+│   └── vision_params.yaml        # HSV ranges, PID gains alineación
 ├── launch/
-│   └── vision.launch.py
+│   └── perception.launch.py
 ├── package.xml
 ├── setup.py
 └── setup.cfg
 ```
 
-### Alineación con pallet (color/forma)
+### Alineación con pallet
 
 ```
-Imagen → HSV filter → máscara binaria → findContours
+/cam_img → HSV filter → máscara binaria → findContours
 → bounding rect → centroide (cx, cy)
-→ error_x = cx - img_width/2
-→ error_y = cy - img_height/2
-→ PID angular:  w = Kp_ang * error_x
-→ PID lineal:   v = Kp_lin * error_y  (negativo = acercarse)
-→ Publicar /cmd_vel
-→ Si |error| < umbral: publicar aligned=True
+→ error_x = cx - img_width/2    → PID angular:  ω = Kp_ang · error_x
+→ error_y = cy - img_height/2   → PID lineal:   v = Kp_lin · error_y
+→ /cmd_vel
+→ |error| < umbral → /alignment_error con aligned=True
 ```
 
-### Aruco (evaluable MR)
+### Aruco
 
-- `cv2.aruco.detectMarkers()` con dict `DICT_4X4_50`
+- `cv2.aruco.detectMarkers()` con `DICT_4X4_50`
 - `cv2.aruco.estimatePoseSingleMarkers()` con calibración de cámara
-- Publica `PoseArray` en `/aruco_poses` con ID en header
+- Publica `PoseArray` en `/aruco_poses`
 
 ---
 
-## Módulo 4 — `puzzlebot_lifter`
+## Módulo 4 — `lifting`
 
 **Evaluable:** M2 FPGA control servo (8%)
 
-### Archivos
+### Estructura
 
 ```
-puzzlebot_lifter/
-├── puzzlebot_lifter/
+lifting/
+├── lifting/
 │   ├── __init__.py
-│   └── lifter_node.py    # Suscribe /lifter_level (UInt8 0-7), escribe 3 pines GPIO
+│   ├── hal/
+│   │   ├── base.py          # GpioDriver abstracto: set_level(n: int)
+│   │   ├── jetson.py        # Jetson.GPIO — 3 pines, board numbering
+│   │   └── mock.py          # Solo logging — para simulación y tests
+│   └── lifting_node.py      # Suscribe /lifter_level (UInt8 0-7), llama hal.set_level()
 ├── config/
-│   └── lifter_params.yaml  # pin_bit0, pin_bit1, pin_bit2, nivel_pick_lower, nivel_pick_upper
+│   └── lifting_params.yaml  # pin_bit0, pin_bit1, pin_bit2, niveles operacionales
 ├── launch/
-│   └── lifter.launch.py
+│   └── lifting.launch.py
 ├── package.xml
 ├── setup.py
 └── setup.cfg
 ```
 
-### Lógica GPIO (Jetson.GPIO)
+### HAL — implementación real
 
 ```python
+# hal/jetson.py
 import Jetson.GPIO as GPIO
 
-PINS = {0: 11, 1: 13, 2: 15}   # pin_bit0, pin_bit1, pin_bit2 (board numbering)
+PINS = {0: 11, 1: 13, 2: 15}   # bit → pin board numbering
 
-def set_level(level: int):      # level ∈ [0, 7]
+def set_level(level: int) -> None:   # level ∈ [0, 7]
     for bit, pin in PINS.items():
         GPIO.output(pin, GPIO.HIGH if (level >> bit) & 1 else GPIO.LOW)
 ```
 
-### Niveles por operación
+### Niveles operacionales
 
 | Operación | Nivel | Binario |
 |---|---|---|
-| Transporte (viajar) | 1 | `001` |
-| Pick pallet piso | 3 | `011` |
-| Carry (cargando) | 4 | `100` |
-| Pick rack nivel 2 | 5 | `101` |
-| Dejar en tráiler | 3 | `011` |
 | Reposo | 0 | `000` |
+| Transporte (viajando) | 1 | `001` |
+| Pick pallet piso | 3 | `011` |
+| Carry (cargando y viajando) | 4 | `100` |
+| Pick rack nivel 2 | 5 | `101` |
+| Dejar en destino | 3 | `011` |
 
 ---
 
-## Módulo 5 — `puzzlebot_voice`
+## Módulo 5 — `voice_control`
 
 **Evaluable:** M4 Comandos de voz (8%)  
-**Referencia:** [JordanPalafox/Practica-1](https://github.com/JordanPalafox/Practica-1) — LPC + VQ, sin Whisper
+**Referencia:** [JordanPalafox/Practica-1](https://github.com/JordanPalafox/Practica-1)
 
-### Archivos
+### Estructura
 
 ```
-puzzlebot_voice/
-├── puzzlebot_voice/
+voice_control/
+├── voice_control/
 │   ├── __init__.py
-│   ├── record.py          # Captura audio 16kHz con pyaudio
-│   ├── endpoint.py        # VAD por energía adaptativa (detecta inicio/fin de palabra)
-│   ├── preprocess.py      # Pre-énfasis + ventana Hamming
-│   ├── lpc.py             # LPC orden 12 → LSF (Autocorrelación + Levinson-Durbin)
-│   ├── vq.py              # LBG clustering, distancia Itakura-Saito
-│   ├── train.py           # Script offline: genera codebooks por palabra
-│   ├── recognizer.py      # Clasificador en tiempo real: frame → VQ dist → palabra
-│   ├── command_parser.py  # Secuencia de palabras → misión JSON
-│   └── voice_node.py     # Nodo ROS2: corre recognizer, publica /voice_command + /mission
-├── codebooks/             # Archivos .pkl generados por train.py (uno por palabra)
+│   ├── record.py              # Captura audio 16kHz con pyaudio
+│   ├── endpoint.py            # VAD por energía adaptativa
+│   ├── preprocess.py          # Pre-énfasis α=0.97 + ventana Hamming
+│   ├── lpc.py                 # LPC orden 12 → LSF (Levinson-Durbin)
+│   ├── vq.py                  # LBG clustering, distancia Itakura-Saito
+│   ├── train.py               # Script offline: genera codebooks por palabra
+│   ├── recognizer.py          # Clasificador en tiempo real
+│   ├── command_parser.py      # Secuencia de palabras → misión JSON
+│   └── voice_node.py          # Nodo ROS2: publica /voice_command + /mission
+├── codebooks/                 # .pkl por palabra (generados por train.py)
 ├── config/
-│   └── voice_params.yaml  # sample_rate, lpc_order, vq_k, umbral_silencio
+│   └── voice_params.yaml      # sample_rate, lpc_order, vq_k, umbral_silencio
 ├── scripts/
-│   └── collect_training_data.py   # Script interactivo para grabar ejemplos
+│   └── collect_training_data.py   # Graba 15 repeticiones por palabra
 ├── launch/
-│   └── voice.launch.py
+│   └── voice_control.launch.py
 ├── package.xml
 ├── setup.py
 └── setup.cfg
 ```
 
-### Vocabulario objetivo (13 palabras)
+### Vocabulario (13 palabras)
 
 `start` `stop` `pause` `next` `ve` `rack` `camion` `roller` `nivel` `uno` `dos` `recoge` `deja`
 
@@ -304,72 +388,64 @@ puzzlebot_voice/
 ```
 Micrófono (16kHz)
     ↓
-VAD — detecta segmento de voz (energía > umbral adaptativo)
+VAD — segmento de voz (energía > umbral adaptativo)
     ↓
 Pre-énfasis (α=0.97) + Hamming windowing (25ms, stride 10ms)
     ↓
 LPC orden 12 → coeficientes LSF por frame
     ↓
-VQ: busca codebook más cercano (distancia Itakura-Saito promedio)
+VQ: codebook más cercano (distancia Itakura-Saito promedio)
     ↓
 Palabra reconocida → buffer de secuencia
     ↓
-command_parser: detecta patrón gramatical → misión JSON
+command_parser → gramática → misión JSON → /mission
 ```
 
 ### Gramática de comandos
 
 ```
-START           → {"cmd": "start"}
-STOP            → {"cmd": "stop"}
-PAUSE           → {"cmd": "pause"}
-NEXT            → {"cmd": "next"}
-VE + RACK + NIVEL + (UNO|DOS) + RECOGE  → {"cmd": "mission", "source": "rack_N", "action": "pick"}
-VE + CAMION + DEJA                       → {"cmd": "mission", "dest": "truck", "action": "place"}
-VE + ROLLER + (RECOGE|DEJA)             → {"cmd": "mission", "zone": "roller", "action": ...}
+START / STOP / PAUSE / NEXT → cmd directo
+VE RACK NIVEL (UNO|DOS) RECOGE  → {"source": "rack_N", "action": "pick"}
+VE CAMION DEJA                   → {"dest": "truck",    "action": "place"}
+VE ROLLER (RECOGE|DEJA)         → {"zone": "roller",   "action": ...}
 ```
 
-### Entrenamiento (offline, una vez)
+### Entrenamiento (una vez, offline)
 
 ```bash
-# 1. Grabar 15 repeticiones por palabra
-ros2 run puzzlebot_voice collect_training_data
-
-# 2. Entrenar codebooks (k=32 vectors)
-ros2 run puzzlebot_voice train
-
-# Los codebooks quedan en codebooks/*.pkl
+ros2 run voice_control collect_training_data   # 15 repeticiones por palabra
+ros2 run voice_control train                   # genera codebooks/*.pkl (k=32)
 ```
 
 ---
 
-## Módulo 6 — `puzzlebot_web`
+## Módulo 6 — `dashboard`
 
 **Evaluable:** E80 Interfaz web (5%)
 
-### Archivos
+### Estructura
 
 ```
-puzzlebot_web/
-├── puzzlebot_web/
+dashboard/
+├── dashboard/
 │   ├── __init__.py
-│   ├── ros_bridge.py      # Thread que suscribe topics ROS2 y expone datos vía queue
-│   └── web_node.py       # Nodo ROS2 que lanza Flask en thread separado
+│   ├── ros_bridge.py      # Thread suscriptor → expone datos vía queue thread-safe
+│   └── dashboard_node.py  # Nodo ROS2: lanza Flask en thread separado
 ├── web/
-│   ├── app.py             # Flask app: REST API + WebSocket (flask-socketio)
+│   ├── app.py             # Flask: REST API + WebSocket (flask-socketio)
 │   ├── templates/
 │   │   └── index.html     # Dashboard: mapa, cámara, estado, telemetría
 │   └── static/
-│       ├── main.js        # SocketIO client, actualiza UI en tiempo real
+│       ├── main.js        # SocketIO client: actualiza UI en tiempo real
 │       └── style.css
 ├── launch/
-│   └── web.launch.py
+│   └── dashboard.launch.py
 ├── package.xml
 ├── setup.py
 └── setup.cfg
 ```
 
-### Endpoints REST
+### REST API
 
 | Método | Ruta | Descripción |
 |---|---|---|
@@ -379,7 +455,7 @@ puzzlebot_web/
 | `POST` | `/api/mission` | Enviar misión JSON → `/mission` topic |
 | `GET` | `/video_feed` | MJPEG stream de `/cam_img` |
 
-### WebSocket events (flask-socketio)
+### WebSocket events
 
 | Evento | Datos | Frecuencia |
 |---|---|---|
@@ -389,69 +465,141 @@ puzzlebot_web/
 
 ---
 
+## Simulación — Gazebo
+
+### Mundo del almacén
+
+Agregar en `description/worlds/warehouse.world`:
+- Tres camiones (modelos SDF rectangulares)
+- Cuatro racks (dos niveles, posiciones medidas del diseño real)
+- Dos rollers (mesas planas)
+- Pallets como cubos de colores (rojo, azul, verde para identificación HSV)
+- Iluminación y paredes
+
+### Plugins requeridos en URDF/SDF
+
+```xml
+<!-- Diferencial -->
+<plugin name="differential_drive" filename="libgazebo_ros_diff_drive.so">
+  <left_joint>left_wheel_joint</left_joint>
+  <right_joint>right_wheel_joint</right_joint>
+  <publish_odom>true</publish_odom>
+  <publish_tf>true</publish_tf>
+</plugin>
+
+<!-- LiDAR -->
+<plugin name="laser" filename="libgazebo_ros_ray_sensor.so">
+  <ros><remapping>~/out:=/scan</remapping></ros>
+</plugin>
+
+<!-- Cámara -->
+<plugin name="camera" filename="libgazebo_ros_camera.so">
+  <ros><remapping>~/image_raw:=/cam_img</remapping></ros>
+</plugin>
+```
+
+### Launch de simulación
+
+`bringup/launch/sim.launch.py` levanta:
+1. `gazebo` con `warehouse.world`
+2. `robot_state_publisher` con el URDF
+3. `slam` (modo simulación, usa `/scan` de Gazebo)
+4. `localization` (EKF con odom de Gazebo)
+5. `navigation`, `perception`, `mission_control`, `dashboard`
+6. `lifting` con `use_mock_gpio:=true`
+7. `rviz2` con config predefinida
+
+---
+
 ## Launch principal
 
-Crear `puzzlebot_bringup/launch/amr_full.launch.py` que levanta todo el stack:
+`bringup/launch/full.launch.py` — punto de entrada único:
+
+```python
+# Argumento: sim:=true/false
+# sim=true  → lanza sim.launch.py  (Gazebo + mocks)
+# sim=false → lanza real.launch.py (hardware Jetson)
+```
+
+### Stack completo (ambos modos)
 
 ```
-slam_node          (puzzlebot_slam)
-ekf_node           (puzzlebot_localization_cpp)
-navigation_node    (puzzlebot_navigation)
-vision_node        (puzzlebot_vision)
-lifter_node        (puzzlebot_lifter)
-voice_node         (puzzlebot_voice)
-state_machine_node (puzzlebot_state_machine)
-web_node           (puzzlebot_web)
+slam_node           (slam)
+ekf_node            (localization)
+navigation_node     (navigation)
+alignment_node      (perception)
+lifting_node        (lifting)       ← mock o real según sim flag
+voice_node          (voice_control) ← omitido en sim si no hay mic
+state_machine_node  (mission_control)
+dashboard_node      (dashboard)
 ```
 
 ---
 
-## Dependencias externas a instalar
+## Dependencias
 
 ```bash
-pip install yasmin           # State machine ROS2
-pip install pyaudio          # Audio capture para voz
-pip install scikit-learn     # VQ clustering (LBG via KMeans)
-pip install flask flask-socketio  # Web interface
-pip install Jetson.GPIO      # GPIO para FPGA lifter (solo en Jetson Nano)
-# OpenCV ya viene con ROS2 Humble
-# NumPy, SciPy ya vienen con ROS2
+pip install yasmin               # State machine ROS2
+pip install pyaudio              # Captura de audio
+pip install scikit-learn         # VQ clustering (LBG via KMeans)
+pip install flask flask-socketio # Dashboard web
+pip install Jetson.GPIO          # GPIO Jetson Nano (solo hardware real)
+# OpenCV, NumPy, SciPy — incluidos con ROS2 Humble
 ```
 
 ---
 
-## Orden de implementación sugerido
+## Orden de implementación
 
-### Fase 1 — Hardware crítico
-1. `puzzlebot_lifter` — validar GPIO → FPGA en físico
-2. `puzzlebot_vision` / `pallet_detector.py` + `alignment_node.py` — alineación básica
+### Fase 0 — Limpieza (1 día)
+- [ ] Renombrar paquetes existentes (quitar prefijo `puzzlebot_`)
+- [ ] Actualizar `package.xml` y `setup.py` en cada paquete renombrado
+- [ ] Crear mundo Gazebo básico del almacén en `description/worlds/`
+- [ ] Verificar build limpio: `colcon build --symlink-install`
 
-### Fase 2 — Navegación
-3. `puzzlebot_navigation` / `astar.py` — probar en simulación con el mapa SLAM existente
-4. `puzzlebot_navigation` / `bug1.py` — integrar evasión
-5. Configurar `waypoints.yaml` con mediciones reales de la pista
+### Fase 1 — Hardware crítico + Sim base (2-3 días)
+- [ ] `lifting` — `hal/mock.py` primero, luego `hal/jetson.py`, validar GPIO → FPGA
+- [ ] `perception` / `pallet_detector.py` + `alignment_node.py` — alineación básica en sim
+- [ ] Launch de simulación funcional con Gazebo
 
-### Fase 3 — Integración con SM
-6. `puzzlebot_state_machine` — primero solo `WAITING → NAVIGATING → ARRIVED`
-7. Expandir estados de pick/place con el lifter real
-8. Integrar alineación visual en el flujo
+### Fase 2 — Navegación (3-4 días)
+- [ ] `navigation` / `astar.py` — unit test con mapa sintético, sin ROS
+- [ ] `navigation` / `navigation_node.py` — integrar con mapa SLAM en sim
+- [ ] `navigation` / `bug1.py` — evasión reactiva en sim con obstáculos dinámicos
+- [ ] Medir waypoints reales y actualizar `waypoints.yaml`
 
-### Fase 4 — Voz y Web
-9. `puzzlebot_voice` — grabar datos, entrenar, integrar con SM
-10. `puzzlebot_web` — interfaz + envío de misiones
+### Fase 3 — Integración con mission_control (2-3 días)
+- [ ] `mission_control` — implementar `WAITING → NAVIGATING → ARRIVED` primero
+- [ ] Añadir `ALIGNING → PICKING → NAVIGATING_DEST → PLACING`
+- [ ] Probar ciclo completo en sim (rack_1 → truck_1)
+- [ ] Integrar `lifting` real en flujo de pick/place en hardware
 
-### Fase 5 — Evaluables pendientes
-11. `puzzlebot_vision` / `aruco_detector.py` — evaluable MR
-12. `puzzlebot_vision` / `trailer_detector.py` — CNN para evaluable E80
+### Fase 4 — Percepción avanzada (2 días)
+- [ ] `perception` / `aruco_detector.py` — evaluable MR
+- [ ] `perception` / `trailer_detector.py` — entrenar CNN para tráiler
+- [ ] Integrar detección de tráiler en `picking_truck.py`
+
+### Fase 5 — Voz y Dashboard (2-3 días)
+- [ ] `voice_control` — grabar datos de entrenamiento (15 reps × 13 palabras)
+- [ ] Entrenar codebooks, validar reconocimiento offline
+- [ ] Integrar `voice_node` con `mission_control`
+- [ ] `dashboard` — Flask + SocketIO, MJPEG stream, envío de misiones
+
+### Fase 6 — Prueba integrada y ajuste (días finales)
+- [ ] Ciclo completo en hardware real: voz / web → SM → navega → alinea → pick → navega → place
+- [ ] Ajustar PID gains con datos reales
+- [ ] Ajustar HSV ranges con iluminación real
+- [ ] Ajustar waypoints con mediciones físicas de la pista
 
 ---
 
 ## Notas de diseño
 
-- **No Nav2**: toda la pila es propia. A* sobre el mapa del SLAM existente.
-- **No Whisper**: LPC + VQ. Entrenamiento offline con 15 grabaciones por palabra.
-- **Mapa pre-guardado**: SLAM corre en modo corrección/localización, no remapea de cero.
-- **Zonas fijas**: los waypoints se miden una vez y quedan en YAML, no hay descubrimiento dinámico.
-- **YASMIN** sobre SMACH: mejor soporte ROS2 Humble, visualizador incluido (`yasmin_viewer`).
-- **Jetson.GPIO** para los 3 pines al FPGA — board numbering, setup como OUTPUT.
-- La cámara detecta pallets por **color/forma** (HSV mask + contornos) — no requiere QR ni Aruco en pallet.
+- **No Nav2**: pila de navegación propia. A* sobre mapa del SLAM existente.
+- **No Whisper**: LPC + VQ con entrenamiento offline de 15 grabaciones por palabra.
+- **Mapa pre-guardado**: SLAM corre en modo corrección (localización), no remapea de cero.
+- **Waypoints fijos**: posiciones medidas una vez, guardadas en YAML.
+- **YASMIN**: mejor soporte ROS2 Humble que SMACH, tiene visualizador propio (`yasmin_viewer`).
+- **Jetson.GPIO**: board numbering, 3 pines a FPGA para encoding binario del lifter.
+- **Pallets por color/forma**: HSV mask + contornos — no requiere QR ni Aruco en pallet.
+- **HAL pattern**: aísla el hardware para que todo sea simulable sin cambios de lógica.

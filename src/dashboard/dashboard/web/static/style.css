@@ -1,0 +1,458 @@
+/* ===================================================================
+   AMR Warehouse Dashboard — Dark Robotics Theme
+   Background: #1a1a2e  |  Panels: #16213e  |  Accent: #00ff88
+   =================================================================== */
+
+/* ---- Reset & base ---- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #1a1a2e;
+  --panel:    #16213e;
+  --surface:  #0f3460;
+  --border:   #1e3a5f;
+  --accent:   #00ff88;
+  --accent2:  #00c8ff;
+  --text:     #e0e6f0;
+  --dim:      #6b7fa3;
+  --danger:   #ff4d6d;
+  --warn:     #ffd166;
+  --info:     #00c8ff;
+  --mono:     'Courier New', Courier, monospace;
+  --sans:     'Segoe UI', system-ui, -apple-system, sans-serif;
+  --radius:   8px;
+  --radius-sm: 4px;
+}
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ---- Utilities ---- */
+.mono   { font-family: var(--mono); }
+.accent { color: var(--accent); }
+.dim    { color: var(--dim); font-style: italic; }
+
+/* ===================================================================
+   HEADER
+   =================================================================== */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.header-brand { display: flex; align-items: center; gap: 14px; }
+
+.header-icon {
+  font-size: 2.2rem;
+  color: var(--accent);
+  line-height: 1;
+  filter: drop-shadow(0 0 6px var(--accent));
+}
+
+.header-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+  text-shadow: 0 0 10px rgba(0,255,136,0.35);
+}
+
+.header-sub {
+  font-size: 0.75rem;
+  color: var(--dim);
+  letter-spacing: 0.06em;
+}
+
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+}
+
+/* ===================================================================
+   CONNECTION DOT
+   =================================================================== */
+.conn-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--dim);
+  transition: background 0.3s;
+}
+.conn-dot.connected    { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.conn-dot.disconnected { background: var(--danger);  box-shadow: 0 0 6px var(--danger); }
+.conn-label { color: var(--dim); }
+
+/* ===================================================================
+   LAYOUT GRID
+   =================================================================== */
+.grid {
+  display: grid;
+  grid-template-columns: 280px 1fr 300px;
+  gap: 16px;
+  padding: 16px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* ===================================================================
+   CARD
+   =================================================================== */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+.card-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+
+/* ===================================================================
+   STATE BADGE
+   =================================================================== */
+.state-badge {
+  display: inline-block;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  background: var(--surface);
+  color: var(--dim);
+  border: 1px solid var(--border);
+  transition: all 0.3s;
+  width: 100%;
+  text-align: center;
+}
+
+/* State-specific colors */
+.state-badge.IDLE,
+.state-badge.WAITING_COMMAND { background: #1e2a3a; color: #8899bb; border-color: #2a3a50; }
+.state-badge.NAVIGATING_TO_SOURCE,
+.state-badge.NAVIGATING_TO_DEST { background: #0a2a4a; color: var(--info); border-color: var(--info); box-shadow: 0 0 8px rgba(0,200,255,0.2); }
+.state-badge.ALIGNING_TO_PALLET,
+.state-badge.ALIGNING_TO_DEST { background: #3a2a00; color: var(--warn); border-color: var(--warn); box-shadow: 0 0 8px rgba(255,209,102,0.2); }
+.state-badge.PICKING_LOWER,
+.state-badge.PICKING_UPPER,
+.state-badge.PICKING_FROM_TRUCK { background: #3a1a00; color: #ff9944; border-color: #ff6600; box-shadow: 0 0 8px rgba(255,100,0,0.2); }
+.state-badge.PLACING_PALLET { background: #1a0a3a; color: #cc88ff; border-color: #8844cc; box-shadow: 0 0 8px rgba(136,68,204,0.2); }
+.state-badge.PAUSED { background: #2a2a00; color: #eeee00; border-color: #888800; }
+.state-badge.EMERGENCY_STOP { background: #3a0000; color: var(--danger); border-color: var(--danger); animation: pulse-danger 1s infinite; }
+.state-badge.ERROR { background: #3a0010; color: var(--danger); border-color: var(--danger); }
+
+@keyframes pulse-danger {
+  0%, 100% { box-shadow: 0 0 6px var(--danger); }
+  50%       { box-shadow: 0 0 18px var(--danger); }
+}
+
+/* ===================================================================
+   MISSION BOX
+   =================================================================== */
+.mission-box {
+  font-size: 0.82rem;
+}
+
+.mission-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+.mission-row:last-child { border-bottom: none; }
+.mission-key { color: var(--dim); }
+.mission-val { font-family: var(--mono); color: var(--accent); }
+
+/* ===================================================================
+   TELEMETRY GRID
+   =================================================================== */
+.tele-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  align-items: center;
+}
+.tele-label { color: var(--dim); font-size: 0.8rem; }
+.tele-val   { font-size: 0.9rem; text-align: right; }
+
+/* ===================================================================
+   VELOCITY BARS
+   =================================================================== */
+.vel-row {
+  display: grid;
+  grid-template-columns: 52px 1fr 80px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.vel-bar-wrap {
+  background: var(--surface);
+  border-radius: 3px;
+  height: 8px;
+  overflow: hidden;
+  position: relative;
+}
+
+.vel-bar {
+  height: 100%;
+  border-radius: 3px;
+  width: 0%;
+  transition: width 0.15s ease;
+}
+
+.vel-bar-linear  { background: linear-gradient(90deg, var(--accent), #00cc66); }
+.vel-bar-angular { background: linear-gradient(90deg, var(--accent2), #0088cc); }
+
+/* ===================================================================
+   LIFTER INDICATOR
+   =================================================================== */
+.lifter-wrap {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  height: 160px;
+  margin-bottom: 8px;
+}
+
+.lifter-column {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 36px;
+}
+
+.lifter-segment {
+  width: 36px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  transition: all 0.2s;
+}
+
+.lifter-segment.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 6px rgba(0,255,136,0.5);
+}
+
+.lifter-labels {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.7rem;
+  color: var(--dim);
+  font-family: var(--mono);
+}
+.lifter-labels span { height: 16px; line-height: 16px; }
+
+.lifter-text { font-size: 0.82rem; color: var(--dim); margin-top: 4px; }
+
+/* ===================================================================
+   CAMERA / MAP FEED
+   =================================================================== */
+.panel-center { overflow: visible; }
+
+.feed-card { flex: 1; display: flex; flex-direction: column; }
+
+.feed-wrap {
+  position: relative;
+  background: #000;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  flex: 1;
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.feed-img {
+  max-width: 100%;
+  max-height: 340px;
+  object-fit: contain;
+  display: block;
+}
+
+/* Map */
+.map-wrap { min-height: 180px; }
+
+.map-img { image-rendering: pixelated; }
+
+.map-no-data {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dim);
+  font-size: 0.85rem;
+  background: rgba(0,0,0,0.6);
+}
+
+.map-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* ===================================================================
+   MISSION FORM
+   =================================================================== */
+.mission-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-label {
+  font-size: 0.75rem;
+  color: var(--dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-top: 4px;
+}
+
+.form-input,
+.form-select {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.88rem;
+  font-family: var(--sans);
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.form-input:focus,
+.form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(0,255,136,0.12); }
+
+.form-select option { background: var(--panel); }
+
+.btn-submit {
+  margin-top: 8px;
+  padding: 10px;
+  background: linear-gradient(135deg, var(--accent), #00cc66);
+  color: #0a1a0a;
+  font-weight: 700;
+  font-size: 0.9rem;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  transition: opacity 0.2s, transform 0.1s;
+}
+
+.btn-submit:hover  { opacity: 0.9; }
+.btn-submit:active { transform: scale(0.97); }
+.btn-submit:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ===================================================================
+   TOAST
+   =================================================================== */
+.toast {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  text-align: center;
+  animation: fadeIn 0.2s;
+}
+.toast.hidden   { display: none; }
+.toast.success  { background: rgba(0,255,136,0.12); border: 1px solid var(--accent); color: var(--accent); }
+.toast.error    { background: rgba(255,77,109,0.12); border: 1px solid var(--danger); color: var(--danger); }
+
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* ===================================================================
+   MISSION HISTORY
+   =================================================================== */
+.history-list {
+  list-style: none;
+  max-height: 180px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.history-item {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+.history-item:last-child { border-bottom: none; }
+.history-item .hist-id   { color: var(--accent); font-family: var(--mono); }
+.history-item .hist-meta { color: var(--dim); }
+
+/* ===================================================================
+   FOOTER
+   =================================================================== */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 24px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  font-size: 0.72rem;
+  color: var(--dim);
+  flex-shrink: 0;
+}
+.footer span { display: flex; align-items: center; gap: 6px; }
+
+/* ===================================================================
+   RESPONSIVE
+   =================================================================== */
+@media (max-width: 1100px) {
+  .grid { grid-template-columns: 240px 1fr 260px; }
+}
+
+@media (max-width: 850px) {
+  .grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+    overflow-y: auto;
+  }
+  .panel-left, .panel-right { overflow: visible; }
+  .feed-img { max-height: 220px; }
+}

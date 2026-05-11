@@ -1,0 +1,17 @@
+state_machine_node:
+  ros__parameters:
+    # Lifter level encoding (3-bit → FPGA via Jetson GPIO)
+    # 000=0 (rest) … 111=7 (max height)
+    rest_level:       0   # Fully lowered — safe approach / idle
+    transport_level:  1   # Carry height for floor picks
+    pick_floor_level: 3   # Insert forks under floor / rack-level-1 pallet
+    carry_level:      4   # Carry height for rack/truck picks
+    pick_rack_level:  5   # Insert forks under rack level-2 pallet
+    place_level:      3   # Lower pallet to destination surface
+
+    # Alignment timeout before declaring alignment failed (seconds)
+    alignment_timeout: 30.0
+
+    # Navigation stuck timeout — passed to the navigation stack (seconds)
+    # The navigation node itself should handle the timeout; this is informational.
+    stuck_timeout: 15.0

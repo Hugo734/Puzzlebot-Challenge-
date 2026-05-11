@@ -1,0 +1,27 @@
+voice_node:
+  ros__parameters:
+    # Path to the codebooks directory (leave empty to use package default)
+    codebook_dir: ""
+
+    # Audio capture
+    sample_rate: 16000           # Hz
+    frame_ms: 25                 # LPC analysis frame length (ms)
+    hop_ms: 10                   # LPC analysis hop size (ms)
+
+    # LPC + VQ feature extraction
+    lpc_order: 12                # LPC / LSF order
+    vq_clusters: 32              # VQ codewords per word
+
+    # Voice activity detection
+    energy_threshold_factor: 3.0  # adaptive threshold multiplier
+    min_speech_ms: 200            # minimum speech duration to accept (ms)
+    silence_ms: 500               # silence after speech to end utterance (ms)
+
+    # Grammar parsing
+    word_buffer_size: 5           # maximum words accumulated before parse attempt
+
+    # Rejection
+    rejection_threshold: 2.0      # distortion above which word is rejected
+
+    # Set true to use /mock_voice topic instead of real microphone
+    mock_mode: false
