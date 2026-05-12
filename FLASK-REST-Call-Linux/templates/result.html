@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Puzzlebot · Control</title>
+<meta name="viewport" content="width=1280">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin:0; padding:0; background:#09090b; color:#e4e4e7;
+    font-family:'Inter',system-ui,sans-serif; height:100vh; overflow:hidden; }
+  :root {
+    --bg:      #09090b;
+    --surface: #111113;
+    --border:  rgba(255,255,255,.07);
+    --border2: rgba(255,255,255,.13);
+    --mute:    #52525b;
+    --dim:     #a1a1aa;
+    --text:    #e4e4e7;
+    --accent:  #34d399;
+    --accent2: #fbbf24;
+    --danger:  #f87171;
+    --mono:    'JetBrains Mono', ui-monospace, monospace;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  button { font-family: var(--mono); }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+/* ─── helpers ─── */
+const p2 = n => String(Math.abs(Math.floor(n))).padStart(2,'0');
+const fmtTime = ms => { const d=new Date(ms); return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`; };
+const fmtUp   = s  => `${p2(s/3600)}:${p2((s/60)%60)}:${p2(s%60)}`;
+
+function useNow(ms=1000){
+  const [n,setN]=useState(Date.now());
+  useEffect(()=>{const id=setInterval(()=>setN(Date.now()),ms);return()=>clearInterval(id);},[ms]);
+  return n;
+}
+
+function useRoll(gen,len=60,ms=300){
+  const [d,setD]=useState(()=>Array.from({length:len},(_,i)=>gen(i)));
+  const k=useRef(0);
+  const genRef=useRef(gen); genRef.current=gen;
+  useEffect(()=>{
+    const id=setInterval(()=>{k.current++;setD(a=>[...a.slice(1),genRef.current(k.current)]);},ms);
+    return()=>clearInterval(id);
+  },[ms]);
+  return d;
+}
+
+/* ─── Sparkline ─── */
+function Spark({data,color='#34d399',h=32}){
+  const ref=useRef(null);
+  const [w,setW]=useState(120);
+  useEffect(()=>{
+    if(!ref.current) return;
+    const ro=new ResizeObserver(([e])=>setW(Math.max(40,e.contentRect.width)));
+    ro.observe(ref.current); return()=>ro.disconnect();
+  },[]);
+  const pts=data.length?data:[0];
+  const lo=Math.min(...pts), hi=Math.max(...pts,lo+.001);
+  const px=i=>(i/(pts.length-1||1))*w;
+  const py=v=>h-((v-lo)/(hi-lo))*(h-4)-2;
+  const path=pts.map((v,i)=>(i?'L':'M')+px(i).toFixed(1)+' '+py(v).toFixed(1)).join('');
+  const fill=path+` L ${w} ${h} L 0 ${h} Z`;
+  const gid='sg'+Math.abs(color.charCodeAt(1));
+  return(
+    <div ref={ref} style={{width:'100%'}}>
+      <svg width={w} height={h} style={{display:'block',overflow:'visible'}}>
+        <defs>
+          <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity=".25"/>
+            <stop offset="100%" stopColor={color} stopOpacity="0"/>
+          </linearGradient>
+        </defs>
+        <path d={fill} fill={`url(#${gid})`}/>
+        <path d={path} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
+        <circle cx={px(pts.length-1)} cy={py(pts[pts.length-1])} r="2.5" fill={color}/>
+      </svg>
+    </div>
+  );
+}
+
+/* ─── Key cap ─── */
+function Key({k,active,label}){
+  const c=active?'var(--accent)':'var(--border2)';
+  return(
+    <div style={{
+      width:44,height:44,borderRadius:6,
+      border:`1.5px solid ${c}`,
+      background:active?'rgba(52,211,153,.12)':'rgba(255,255,255,.03)',
+      display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
+      fontFamily:'var(--mono)',fontSize:15,fontWeight:700,
+      color:active?'var(--accent)':'var(--mute)',
+      boxShadow:active?'0 0 14px rgba(52,211,153,.35)':'none',
+      transition:'all .08s',
+    }}>
+      {k}
+      {label&&<span style={{fontSize:7,letterSpacing:'.1em',marginTop:1,opacity:.7}}>{label}</span>}
+    </div>
+  );
+}
+
+/* ─── SLAM map (synthetic lidar + real pose) ─── */
+function MapView({pose,waypoints,onAdd,onClear}){
+  const ref=useRef(null);
+  const [sz,setSz]=useState({w:600,h:420});
+  useEffect(()=>{
+    if(!ref.current) return;
+    const ro=new ResizeObserver(([e])=>{
+      const r=e.contentRect;
+      setSz({w:Math.max(100,r.width),h:Math.max(100,r.height)});
+    });
+    ro.observe(ref.current); return()=>ro.disconnect();
+  },[]);
+
+  const W=12,H=8;
+  const sx=sz.w/W, sy=sz.h/H;
+  const px=(x,y)=>[x*sx, sz.h-y*sy];
+
+  const walls=useMemo(()=>[
+    [[.8,.8],[11.2,.8],[11.2,7.2],[.8,7.2],[.8,.8]],
+    [[2.5,2],[5,2],[5,4.2],[2.5,4.2],[2.5,2]],
+    [[7,4.5],[10,4.5],[10,6.5],[7,6.5],[7,4.5]],
+    [[5.8,1.5],[6.3,1.5],[6.3,2.2],[5.8,2.2],[5.8,1.5]],
+  ],[]);
+
+  const rays=useMemo(()=>{
+    const N=140,R=4,out=[];
+    for(let i=0;i<N;i++){
+      const a=pose.theta+(i/N)*Math.PI*2;
+      const dx=Math.cos(a),dy=Math.sin(a);
+      let r=.1,hit=false;
+      while(r<R&&!hit){
+        const qx=pose.x+dx*r, qy=pose.y+dy*r;
+        for(const w of walls){
+          for(let k=0;k<w.length-1;k++){
+            const[x1,y1]=w[k],[x2,y2]=w[k+1];
+            const ax=x2-x1,ay=y2-y1,bx=qx-x1,by=qy-y1;
+            const t=Math.max(0,Math.min(1,(ax*bx+ay*by)/(ax*ax+ay*ay||1)));
+            if(Math.hypot(qx-x1-ax*t,qy-y1-ay*t)<.055){hit=true;break;}
+          }
+          if(hit) break;
+        }
+        r+=.065;
+      }
+      out.push([a, Math.min(r,R)+(Math.random()-.5)*.018]);
+    }
+    return out;
+  },[pose.x,pose.y,pose.theta,walls]);
+
+  const [rpx,rpy]=px(pose.x,pose.y);
+
+  return(
+    <div ref={ref} onClick={e=>{
+      const r=ref.current.getBoundingClientRect();
+      onAdd({x:(e.clientX-r.left)/sx, y:(sz.h-(e.clientY-r.top))/sy});
+    }} style={{
+      position:'relative',width:'100%',flex:1,
+      background:'#0c0c0e',borderRadius:10,overflow:'hidden',cursor:'crosshair',
+    }}>
+      <svg width={sz.w} height={sz.h} style={{display:'block',position:'absolute',inset:0}}>
+        <defs>
+          <pattern id="g1" width={sx*.5} height={sy*.5} patternUnits="userSpaceOnUse">
+            <path d={`M ${sx*.5} 0 L 0 0 0 ${sy*.5}`} fill="none" stroke="rgba(255,255,255,.04)" strokeWidth=".5"/>
+          </pattern>
+          <pattern id="g2" width={sx} height={sy} patternUnits="userSpaceOnUse">
+            <path d={`M ${sx} 0 L 0 0 0 ${sy}`} fill="none" stroke="rgba(255,255,255,.07)" strokeWidth=".8"/>
+          </pattern>
+        </defs>
+        <rect width={sz.w} height={sz.h} fill="url(#g1)"/>
+        <rect width={sz.w} height={sz.h} fill="url(#g2)"/>
+
+        {walls.map((w,i)=>(
+          <polyline key={i} fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.2)" strokeWidth="1.5"
+            points={w.map(p=>px(p[0],p[1]).join(',')).join(' ')}/>
+        ))}
+
+        <polygon fill="rgba(52,211,153,.07)"
+          points={[[rpx,rpy],...rays.map(([a,r])=>px(pose.x+Math.cos(a)*r,pose.y+Math.sin(a)*r))].map(p=>p.join(',')).join(' ')}/>
+        {rays.map(([a,r],i)=>{
+          const [qx,qy]=px(pose.x+Math.cos(a)*r,pose.y+Math.sin(a)*r);
+          return <circle key={i} cx={qx} cy={qy} r="1.2" fill="var(--accent)" opacity={r>=3.9?.2:.85}/>;
+        })}
+
+        {pose.trail&&pose.trail.length>1&&(
+          <polyline fill="none" stroke="rgba(251,191,36,.45)" strokeWidth="1.2" strokeDasharray="2 4"
+            points={pose.trail.map(p=>px(p.x,p.y).join(',')).join(' ')}/>
+        )}
+
+        {waypoints.map((w,i)=>{
+          const [wpx,wpy]=px(w.x,w.y);
+          return(
+            <g key={i}>
+              <circle cx={wpx} cy={wpy} r="10" fill="none" stroke="var(--accent2)" strokeWidth="1.2"/>
+              <circle cx={wpx} cy={wpy} r="3" fill="var(--accent2)"/>
+              <text x={wpx+13} y={wpy+3.5} fontSize="9" fontFamily="var(--mono)" fill="var(--accent2)" fontWeight="700">
+                WP{i+1}
+              </text>
+            </g>
+          );
+        })}
+
+        <g transform={`translate(${rpx},${rpy}) rotate(${-pose.theta*180/Math.PI})`}>
+          <circle r="15" fill="none" stroke="var(--accent)" strokeWidth=".8" opacity=".4"/>
+          <path d="M0,0 L20,-8 L20,8 Z" fill="var(--accent)" opacity=".2"/>
+          <line x1="0" y1="0" x2="20" y2="0" stroke="var(--accent)" strokeWidth="1.5"/>
+          <circle r="7" fill="var(--accent)"/>
+          <circle r="3" fill="#09090b"/>
+        </g>
+      </svg>
+
+      <div style={{position:'absolute',top:10,left:14,fontFamily:'var(--mono)',fontSize:10,
+        color:'var(--dim)',letterSpacing:'.08em'}}>
+        <div>/scan · /odom · /map</div>
+        <div style={{marginTop:3}}>
+          x <b style={{color:'var(--text)'}}>{pose.x.toFixed(2)}</b> &nbsp;
+          y <b style={{color:'var(--text)'}}>{pose.y.toFixed(2)}</b> &nbsp;
+          θ <b style={{color:'var(--text)'}}>{(pose.theta*180/Math.PI).toFixed(1)}°</b>
+        </div>
+      </div>
+      <div style={{position:'absolute',bottom:10,left:14,right:14,
+        display:'flex',justifyContent:'space-between',
+        fontFamily:'var(--mono)',fontSize:9.5,color:'var(--mute)',letterSpacing:'.1em'}}>
+        <span><span style={{color:'var(--accent)'}}>●</span> LIDAR &nbsp;<span style={{color:'var(--accent2)'}}>●</span> WP</span>
+        <span style={{display:'flex',gap:10,alignItems:'center'}}>
+          <span>CLICK = AÑADIR WP</span>
+          {waypoints.length>0&&(
+            <button onClick={e=>{e.stopPropagation();onClear();}} style={{
+              background:'transparent',border:'1px solid var(--border2)',color:'var(--dim)',
+              fontSize:9,letterSpacing:'.1em',padding:'2px 8px',borderRadius:4,cursor:'pointer'}}>CLEAR</button>
+          )}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Camera feed (real MJPEG) ─── */
+function CamView(){
+  const now=useNow(1000);
+  const [loaded,setLoaded]=useState(false);
+  const [error,setError]=useState(false);
+  return(
+    <div style={{
+      position:'relative',flex:1,background:'#000',borderRadius:10,
+      overflow:'hidden',minHeight:280,display:'flex',alignItems:'stretch',
+    }}>
+      {!error&&(
+        <img
+          src="/api/camera"
+          alt="Camera Feed"
+          style={{width:'100%',height:'100%',objectFit:'contain',display:'block'}}
+          onLoad={()=>setLoaded(true)}
+          onError={()=>setError(true)}
+        />
+      )}
+      {(!loaded||error)&&(
+        <div style={{
+          position:'absolute',inset:0,display:'flex',flexDirection:'column',
+          alignItems:'center',justifyContent:'center',
+          color:'rgba(255,255,255,.2)',fontFamily:'var(--mono)',fontSize:11,gap:12,
+        }}>
+          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
+            <rect x="2" y="9" width="40" height="26" rx="3" stroke="currentColor" strokeWidth="1.5"/>
+            <circle cx="22" cy="22" r="7" stroke="currentColor" strokeWidth="1.5"/>
+            <circle cx="22" cy="22" r="2.5" fill="currentColor"/>
+            <path d="M14 9 L17 5 L27 5 L30 9" stroke="currentColor" strokeWidth="1.5" fill="none"/>
+          </svg>
+          <span>{error?'Sin señal de cámara':'Conectando cámara...'}</span>
+          <span style={{fontSize:9,letterSpacing:'.1em',color:'rgba(255,255,255,.1)'}}>
+            {error?'Verifica que ros2-grpc-wrapper.py esté corriendo':'MJPEG · /api/camera'}
+          </span>
+        </div>
+      )}
+      {/* top HUD bar */}
+      <div style={{
+        position:'absolute',top:10,left:12,right:12,
+        display:'flex',justifyContent:'space-between',
+        fontFamily:'var(--mono)',fontSize:9.5,letterSpacing:'.08em',
+        color:'rgba(255,255,255,.4)',pointerEvents:'none',
+      }}>
+        <span>/camera/image_result · ROS2</span>
+        <span style={{display:'flex',gap:6,alignItems:'center',
+          color:loaded&&!error?'var(--danger)':'rgba(255,255,255,.2)'}}>
+          {loaded&&!error&&<span style={{
+            width:6,height:6,borderRadius:'50%',background:'var(--danger)',
+            animation:'pulse 1.2s infinite',display:'inline-block',
+          }}/>}
+          {loaded&&!error?'LIVE':'OFFLINE'}
+        </span>
+      </div>
+      {/* bottom bar */}
+      <div style={{
+        position:'absolute',bottom:0,left:0,right:0,
+        padding:'8px 12px',
+        background:'linear-gradient(0deg,rgba(0,0,0,.7),transparent)',
+        display:'flex',justifyContent:'space-between',
+        fontFamily:'var(--mono)',fontSize:9.5,color:'rgba(255,255,255,.3)',
+        letterSpacing:'.1em',pointerEvents:'none',
+      }}>
+        <span>MJPEG STREAM</span>
+        <span>{fmtTime(now)}</span>
+      </div>
+      {/* crosshair */}
+      {loaded&&!error&&(
+        <div style={{position:'absolute',top:'50%',left:'50%',
+          transform:'translate(-50%,-50%)',pointerEvents:'none',opacity:.4}}>
+          <svg width="32" height="32">
+            <circle cx="16" cy="16" r="11" fill="none" stroke="var(--accent)" strokeWidth=".8"/>
+            <line x1="16" y1="2"  x2="16" y2="8"  stroke="var(--accent)" strokeWidth="1"/>
+            <line x1="16" y1="24" x2="16" y2="30" stroke="var(--accent)" strokeWidth="1"/>
+            <line x1="2"  y1="16" x2="8"  y2="16" stroke="var(--accent)" strokeWidth="1"/>
+            <line x1="24" y1="16" x2="30" y2="16" stroke="var(--accent)" strokeWidth="1"/>
+          </svg>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Telemetry value card ─── */
+function TeleValue({label,value,unit,color,spark}){
+  return(
+    <div style={{
+      padding:'12px 14px',background:'var(--surface)',
+      border:'1px solid var(--border)',borderRadius:8,
+      display:'flex',flexDirection:'column',gap:6,
+    }}>
+      <span style={{fontFamily:'var(--mono)',fontSize:9.5,letterSpacing:'.14em',
+        textTransform:'uppercase',color:'var(--mute)'}}>{label}</span>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:8}}>
+        <span style={{fontSize:22,fontWeight:600,fontFamily:'var(--mono)',
+          color:color||'var(--text)',fontVariantNumeric:'tabular-nums',lineHeight:1}}>
+          {value}
+          <span style={{fontSize:11,color:'var(--dim)',marginLeft:4,fontWeight:400}}>{unit}</span>
+        </span>
+        {spark&&<div style={{flex:1,minWidth:60,maxWidth:100}}><Spark data={spark} color={color||'#34d399'}/></div>}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Main App ─── */
+function App(){
+  const [tab,setTab]=useState('camara');
+  const [keys,setKeys]=useState({w:false,a:false,s:false,d:false,shift:false});
+  const [eStop,setEStop]=useState(false);
+  // Pose comes from real odom; start at map center
+  const [pose,setPose]=useState({x:6.0,y:4.0,theta:0,trail:[]});
+  const [waypoints,setWaypoints]=useState([]);
+  const [uptime,setUptime]=useState(0);
+  const [vel,setVel]=useState({lin:0,ang:0});
+  const [rosConnected,setRosConnected]=useState(false);
+
+  const velRef=useRef({lin:0,ang:0});
+  const keysRef=useRef(keys);    useEffect(()=>{keysRef.current=keys;},[keys]);
+  const eStopRef=useRef(eStop);  useEffect(()=>{eStopRef.current=eStop;},[eStop]);
+  const maxL=0.6, maxA=1.4;
+
+  /* velocity smoothing loop (drives visual feedback + cmd_vel) */
+  useEffect(()=>{
+    let raf, last=performance.now();
+    const tick=now=>{
+      const dt=Math.min(.05,(now-last)/1000); last=now;
+      const k=keysRef.current, st=eStopRef.current, b=k.shift?1.6:1;
+      let tL=0, tA=0;
+      if(!st){
+        if(k.w) tL+=maxL*b;  if(k.s) tL-=maxL*b*.6;
+        if(k.a) tA+=maxA;    if(k.d) tA-=maxA;
+      }
+      const v=velRef.current;
+      v.lin+=(tL-v.lin)*Math.min(1,dt*4);
+      v.ang+=(tA-v.ang)*Math.min(1,dt*4);
+      setVel({lin:v.lin,ang:v.ang});
+      raf=requestAnimationFrame(tick);
+    };
+    raf=requestAnimationFrame(tick);
+    return()=>cancelAnimationFrame(raf);
+  },[]);
+
+  /* send cmd_vel to robot at 10 Hz */
+  useEffect(()=>{
+    const id=setInterval(()=>{
+      const v=velRef.current;
+      fetch('/api/cmd_vel',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({linear:parseFloat(v.lin.toFixed(4)), angular:parseFloat(v.ang.toFixed(4))})
+      }).catch(()=>{});
+    },100);
+    return()=>clearInterval(id);
+  },[]);
+
+  /* poll real odometry */
+  useEffect(()=>{
+    const id=setInterval(()=>{
+      fetch('/api/odom')
+        .then(r=>r.json())
+        .then(d=>{
+          setRosConnected(true);
+          setPose(prev=>{
+            const moved=Math.hypot(d.x-prev.x,d.y-prev.y)>0.015;
+            const trail=moved?[...prev.trail.slice(-200),{x:prev.x,y:prev.y}]:prev.trail;
+            // clamp to map bounds for display
+            const mx=Math.max(.5,Math.min(11.5,d.x+6.0));
+            const my=Math.max(.5,Math.min(7.5,d.y+4.0));
+            return{x:mx,y:my,theta:d.theta,trail};
+          });
+        })
+        .catch(()=>setRosConnected(false));
+    },200);
+    return()=>clearInterval(id);
+  },[]);
+
+  useEffect(()=>{const id=setInterval(()=>setUptime(u=>u+1),1000);return()=>clearInterval(id);},[]);
+
+  /* keyboard handler */
+  useEffect(()=>{
+    const map={w:'w',a:'a',s:'s',d:'d',
+      arrowup:'w',arrowleft:'a',arrowdown:'s',arrowright:'d',shift:'shift'};
+    const dn=e=>{
+      if(e.code==='Space'){setEStop(v=>!v);e.preventDefault();return;}
+      const k=map[e.key.toLowerCase()];
+      if(k){setKeys(s=>({...s,[k]:true}));e.preventDefault();}
+    };
+    const up=e=>{
+      const k=map[e.key.toLowerCase()];
+      if(k) setKeys(s=>({...s,[k]:false}));
+    };
+    window.addEventListener('keydown',dn);
+    window.addEventListener('keyup',up);
+    return()=>{window.removeEventListener('keydown',dn);window.removeEventListener('keyup',up);};
+  },[]);
+
+  const now=useNow(1000);
+  const battery=Math.max(20,87-uptime/120);
+  const linBuf=useRoll(useCallback(()=>Math.abs(velRef.current.lin)+(Math.random()-.5)*.03,[]),60,250);
+  const angBuf=useRoll(useCallback(()=>Math.abs(velRef.current.ang)+(Math.random()-.5)*.04,[]),60,250);
+  const cpuBuf=useRoll(useCallback((_,k)=>22+Math.sin(k*.3)*9+Math.random()*4,[]),60,400);
+
+  return(
+    <div style={{height:'100vh',display:'flex',flexDirection:'column',background:'var(--bg)',color:'var(--text)'}}>
+
+      {/* ── HEADER ── */}
+      <header style={{
+        display:'flex',alignItems:'center',gap:16,padding:'0 24px',height:56,flexShrink:0,
+        borderBottom:'1px solid var(--border)',background:'var(--surface)',
+      }}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <span style={{fontFamily:'var(--mono)',fontSize:13,fontWeight:700,
+            letterSpacing:'.2em',color:'var(--accent)'}}>PUZZLEBOT</span>
+        </div>
+
+        <nav style={{display:'flex',gap:2,marginLeft:16}}>
+          {[{id:'mapa',label:'MAPA'},{id:'camara',label:'CÁMARA'},{id:'teleop',label:'TELEOP'}].map(t=>(
+            <button key={t.id} onClick={()=>setTab(t.id)} style={{
+              padding:'6px 18px',background:'transparent',cursor:'pointer',
+              fontFamily:'var(--mono)',fontSize:10.5,letterSpacing:'.12em',
+              fontWeight:tab===t.id?600:400,
+              border:`1px solid ${tab===t.id?'var(--accent)':'transparent'}`,
+              borderRadius:6,
+              color:tab===t.id?'var(--accent)':'var(--mute)',
+              transition:'all .15s',
+            }}>{t.label}</button>
+          ))}
+        </nav>
+
+        <div style={{flex:1}}/>
+
+        <div style={{display:'flex',gap:10,alignItems:'center'}}>
+          <span style={{
+            display:'inline-flex',gap:5,alignItems:'center',
+            fontFamily:'var(--mono)',fontSize:9,letterSpacing:'.08em',
+            color:rosConnected?'var(--accent)':'var(--mute)',
+            padding:'3px 8px',borderRadius:999,
+            border:`1px solid ${rosConnected?'var(--accent)':'var(--border2)'}`,
+          }}>
+            <span style={{width:5,height:5,borderRadius:'50%',
+              background:rosConnected?'var(--accent)':'var(--mute)',
+              animation:rosConnected?'pulse 1.6s ease-in-out infinite':'none'}}/>
+            {rosConnected?'ROS2 ONLINE':'ROS2 OFFLINE'}
+          </span>
+          <span style={{
+            display:'inline-flex',gap:6,alignItems:'center',
+            fontFamily:'var(--mono)',fontSize:9.5,letterSpacing:'.08em',
+            color:eStop?'var(--danger)':'var(--accent)',
+            padding:'4px 10px',borderRadius:999,
+            border:`1px solid ${eStop?'var(--danger)':'var(--accent)'}`,
+          }}>
+            <span style={{width:6,height:6,borderRadius:'50%',
+              background:eStop?'var(--danger)':'var(--accent)',
+              animation:'pulse 1.6s ease-in-out infinite'}}/>
+            {eStop?'E-STOP':'ARMADO'}
+          </span>
+          <span style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--dim)',
+            letterSpacing:'.08em',fontVariantNumeric:'tabular-nums'}}>{fmtTime(now)}</span>
+        </div>
+      </header>
+
+      {/* ── BODY ── */}
+      <div style={{flex:1,minHeight:0,padding:16,display:'flex',flexDirection:'column',gap:12}}>
+
+        {/* ── TAB: MAPA ── */}
+        {tab==='mapa'&&(
+          <div style={{flex:1,display:'flex',flexDirection:'column',gap:12,minHeight:0}}>
+            <MapView pose={pose} waypoints={waypoints}
+              onAdd={w=>setWaypoints(ws=>[...ws,w])}
+              onClear={()=>setWaypoints([])}/>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:10,flexShrink:0}}>
+              <TeleValue label="Posición X"    value={pose.x.toFixed(2)} unit="m"      color="var(--accent)"/>
+              <TeleValue label="Posición Y"    value={pose.y.toFixed(2)} unit="m"      color="var(--accent)"/>
+              <TeleValue label="Orientación θ" value={(pose.theta*180/Math.PI).toFixed(1)} unit="°"/>
+              <TeleValue label="Vel. Lineal"   value={vel.lin.toFixed(2)} unit="m/s"
+                color={vel.lin>0.05?'var(--accent)':'var(--dim)'} spark={linBuf}/>
+              <TeleValue label="Vel. Angular"  value={vel.ang.toFixed(2)} unit="rad/s"
+                color={Math.abs(vel.ang)>0.1?'var(--accent2)':'var(--dim)'} spark={angBuf}/>
+            </div>
+          </div>
+        )}
+
+        {/* ── TAB: CÁMARA ── */}
+        {tab==='camara'&&(
+          <div style={{flex:1,display:'flex',flexDirection:'column',gap:12,minHeight:0}}>
+            <CamView/>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10,flexShrink:0}}>
+              <TeleValue label="Pos. X"    value={pose.x.toFixed(2)} unit="m"  color="var(--accent)"/>
+              <TeleValue label="Pos. Y"    value={pose.y.toFixed(2)} unit="m"  color="var(--accent)"/>
+              <TeleValue label="θ"         value={(pose.theta*180/Math.PI).toFixed(1)} unit="°"/>
+              <TeleValue label="Uptime"    value={fmtUp(uptime)}/>
+            </div>
+          </div>
+        )}
+
+        {/* ── TAB: TELEOP ── */}
+        {tab==='teleop'&&(
+          <div style={{flex:1,display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,minHeight:0}}>
+
+            {/* left: WASD control */}
+            <div style={{
+              background:'var(--surface)',border:'1px solid var(--border)',
+              borderRadius:10,padding:24,display:'flex',flexDirection:'column',gap:20,
+            }}>
+              <div style={{fontFamily:'var(--mono)',fontSize:10,letterSpacing:'.14em',
+                textTransform:'uppercase',color:'var(--mute)'}}>Control · /cmd_vel</div>
+
+              <div style={{display:'grid',gridTemplateColumns:'repeat(3,44px)',gap:6,alignSelf:'center'}}>
+                <div/><Key k="W" label="FWD"   active={keys.w}/><div/>
+                <Key k="A" label="IZQ" active={keys.a}/>
+                <Key k="S" label="REV"  active={keys.s}/>
+                <Key k="D" label="DER" active={keys.d}/>
+              </div>
+
+              <div style={{fontSize:10,fontFamily:'var(--mono)',letterSpacing:'.1em',
+                color:'var(--mute)',textAlign:'center'}}>
+                SHIFT = boost · SPACE = E-stop · ↑↓←→ también funciona
+              </div>
+
+              {[
+                {l:'LINEAL /cmd_vel.linear.x', v:vel.lin, max:maxL, c:'var(--accent)'},
+                {l:'ANGULAR /cmd_vel.angular.z', v:vel.ang, max:maxA, c:'var(--accent2)', bipolar:true},
+              ].map(({l,v,max,c,bipolar})=>(
+                <div key={l} style={{display:'flex',flexDirection:'column',gap:5}}>
+                  <div style={{display:'flex',justifyContent:'space-between',
+                    fontFamily:'var(--mono)',fontSize:9.5,letterSpacing:'.1em',color:'var(--mute)'}}>
+                    <span>{l}</span>
+                    <span style={{color:'var(--text)',fontVariantNumeric:'tabular-nums'}}>
+                      {v>=0?'+':''}{v.toFixed(2)} {bipolar?'rad/s':'m/s'}
+                    </span>
+                  </div>
+                  <div style={{position:'relative',height:6,background:'rgba(255,255,255,.05)',borderRadius:3}}>
+                    {bipolar&&<div style={{position:'absolute',left:'50%',top:-2,bottom:-2,width:1,background:'var(--border2)'}}/>}
+                    <div style={{
+                      position:'absolute',
+                      left: bipolar?(v>=0?'50%':`${50+v/max*50}%`):'0',
+                      width: bipolar?`${Math.abs(v)/max*50}%`:`${Math.min(100,Math.abs(v)/max*100)}%`,
+                      top:0,bottom:0,background:c,borderRadius:3,
+                      boxShadow:`0 0 8px ${c}77`,transition:'width .1s,left .1s',
+                    }}/>
+                  </div>
+                </div>
+              ))}
+
+              <button onClick={()=>setEStop(v=>!v)} style={{
+                padding:'11px',borderRadius:8,cursor:'pointer',
+                fontSize:11,fontWeight:700,letterSpacing:'.16em',
+                border:`1px solid ${eStop?'var(--danger)':'rgba(248,113,113,.4)'}`,
+                background:eStop?'var(--danger)':'transparent',
+                color:eStop?'#000':'var(--danger)',
+                boxShadow:eStop?'0 0 20px rgba(248,113,113,.5)':'none',
+                transition:'all .15s',
+              }}>
+                {eStop?'◼ DETENIDO — CLICK PARA ARMAR':'⏻ PARADA DE EMERGENCIA'}
+              </button>
+            </div>
+
+            {/* right: sensors & battery */}
+            <div style={{display:'flex',flexDirection:'column',gap:10}}>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                <TeleValue label="Posición X" value={pose.x.toFixed(2)} unit="m" color="var(--accent)"/>
+                <TeleValue label="Posición Y" value={pose.y.toFixed(2)} unit="m" color="var(--accent)"/>
+                <TeleValue label="θ" value={(pose.theta*180/Math.PI).toFixed(1)} unit="°"/>
+                <TeleValue label="Uptime" value={fmtUp(uptime)}/>
+              </div>
+
+              <div style={{
+                padding:'14px 16px',background:'var(--surface)',
+                border:'1px solid var(--border)',borderRadius:8,
+                display:'flex',flexDirection:'column',gap:8,
+              }}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline'}}>
+                  <span style={{fontFamily:'var(--mono)',fontSize:9.5,letterSpacing:'.14em',
+                    textTransform:'uppercase',color:'var(--mute)'}}>BATERÍA · 11.1V LiPo</span>
+                  <span style={{fontFamily:'var(--mono)',fontSize:16,fontWeight:600,
+                    color:battery<30?'var(--danger)':battery<50?'var(--accent2)':'var(--accent)',
+                    fontVariantNumeric:'tabular-nums'}}>{battery.toFixed(0)}%</span>
+                </div>
+                <div style={{height:8,background:'rgba(255,255,255,.06)',borderRadius:4,overflow:'hidden'}}>
+                  <div style={{
+                    height:'100%',transition:'width .5s',width:`${battery}%`,borderRadius:4,
+                    background:battery<30?'var(--danger)':battery<50?'var(--accent2)':'var(--accent)',
+                  }}/>
+                </div>
+                <div style={{display:'flex',justifyContent:'space-between',
+                  fontFamily:'var(--mono)',fontSize:10,color:'var(--dim)'}}>
+                  <span>{(11.1+(battery-50)/50*.6).toFixed(2)} V</span>
+                  <span>{(.4+Math.abs(vel.lin)*.8).toFixed(2)} A</span>
+                  <span>~{Math.floor(battery*1.4)} min</span>
+                </div>
+              </div>
+
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                <TeleValue label="CPU" value={cpuBuf[cpuBuf.length-1]?.toFixed(0)||'0'} unit="%" spark={cpuBuf} color="#7aa9ff"/>
+                <TeleValue label="Vel. Lineal" value={vel.lin.toFixed(2)} unit="m/s" spark={linBuf} color="var(--accent)"/>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── FOOTER ── */}
+      <footer style={{
+        height:32,flexShrink:0,borderTop:'1px solid var(--border)',background:'var(--surface)',
+        display:'flex',alignItems:'center',padding:'0 20px',gap:20,
+        fontFamily:'var(--mono)',fontSize:10,color:'var(--mute)',letterSpacing:'.06em',
+      }}>
+        <span>ROS2 HUMBLE</span>
+        <span>/cmd_vel {vel.lin.toFixed(2)} m/s · {vel.ang.toFixed(2)} rad/s</span>
+        <span>BATT {battery.toFixed(0)}%</span>
+        <span style={{flex:1}}/>
+        <span style={{color:eStop?'var(--danger)':'var(--accent)'}}>
+          ● {eStop?'DETENIDO':'ACTIVO'}
+        </span>
+        <span>UPTIME {fmtUp(uptime)}</span>
+      </footer>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
