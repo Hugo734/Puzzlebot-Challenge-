@@ -1,108 +1,122 @@
-# Puzzlebot-Challenge-
-This repository is for the implementation of the class "Integración de robótica y sistemas inteligentes" at Tecnologico de Monterrey
+# Puzzlebot Control UI
 
-## Week 1 — Robot Visualization in RViz
+Interfaz web para teleoperación y monitoreo de un robot Puzzlebot usando ROS 2 Humble.
 
-Spawns the MCR2 Puzzlebot (Jetson + Lidar edition) in RViz. The robot automatically moves in a circle around the origin while the wheels spin.
+---
 
-### Requirements
+## Arquitectura
 
-#### Option 1: Docker (Recommended)
-
-Build the Docker image:
-
-```bash
-docker build -t puzzlebot -f .devcontainer/Dockerfile .
+```
+ROS 2 (robot)
+    │  /odom  /image_result  /cmd_vel
+    ▼
+ros2-grpc-wrapper.py   ← Terminal 1
+    │  HTTP REST  :7043   (GET /odom, GET /image, POST /cmd_vel)
+    │  gRPC       :7042   (GetMultCoords, GetImageResult)
+    ▼
+app.py  (Flask)        ← Terminal 2
+    │  :8002
+    ▼
+Navegador  →  http://localhost:8002
 ```
 
-Run the container:
+| Componente | Archivo | Puerto |
+|---|---|---|
+| ROS 2 wrapper | `PY-RPC-Wrapper-Server-Linux/ros2-grpc-wrapper.py` | HTTP 7043 · gRPC 7042 |
+| Servidor web Flask | `FLASK-REST-Call-Linux/app.py` | 8002 |
+| UI React | `FLASK-REST-Call-Linux/templates/result.html` | — |
+
+---
+
+## Requisitos previos
+
+- ROS 2 Humble instalado y con `source /opt/ros/humble/setup.bash`
+- Python 3.10+
+- Paquetes Python: `flask`, `requests`, `grpcio`, `grpcio-tools`, `opencv-python`, `cv_bridge`, `rclpy`
+
+---
+
+## Cómo lanzar
+
+### Terminal 1 — ROS 2 Wrapper (debe correr en el entorno ROS 2)
+
+> **Importante:** si tienes Miniconda/Anaconda activo, desactívalo primero.
+> ROS 2 Humble requiere Python 3.10 del sistema; conda usa Python 3.12 y rompe `rclpy`.
 
 ```bash
-docker run -it --rm --gpus all --network host \
-  -e DISPLAY=$DISPLAY \
-  -v /tmp/.X11-unix:/tmp/.X11-unix \
-  puzzlebot bash
+conda deactivate
+source /opt/ros/humble/setup.bash
+cd /home/rosendorios/Desktop/Modulo3/UI/PY-RPC-Wrapper-Server-Linux
+python3 ros2-grpc-wrapper.py
 ```
 
-#### Option 2: System dependencies (ROS 2 Humble on Ubuntu 22.04)
+Este proceso:
+- Crea un nodo ROS 2 `object_position_wrapper`
+- Se suscribe a `/odom` y `/image_result`
+- Publica en `/cmd_vel` a 20 Hz
+- Expone un servidor HTTP en el puerto **7043** y un servidor gRPC en el puerto **7042**
 
-Core ROS 2 tools and robot description utilities:
+### Terminal 2 — Servidor Flask (UI web)
 
 ```bash
-sudo apt-get install -y \
-  ros-humble-robot-state-publisher \
-  ros-humble-joint-state-publisher \
-  ros-humble-joint-state-publisher-gui \
-  ros-humble-rviz2 \
-  ros-humble-xacro \
-  ros-humble-tf2-ros \
-  ros-humble-teleop-twist-keyboard
+cd /home/rosendorios/Desktop/Modulo3/UI/FLASK-REST-Call-Linux
+python3 app.py
 ```
 
-Gazebo (Ignition Fortress) + ROS 2 bridge:
+Este proceso:
+- Sirve la interfaz web en `http://localhost:8002`
+- Hace de proxy entre el navegador y el wrapper:
+  - `GET /api/odom` → obtiene posición del robot
+  - `POST /api/cmd_vel` → envía comandos de velocidad
+  - `GET /api/camera` → stream MJPEG de la cámara
 
-```bash
-sudo apt-get install -y \
-  ros-humble-ros-gz-sim \
-  ros-humble-ros-gz-bridge \
-  ros-humble-ros-gz-interfaces
+### Abrir la UI
+
+```
+http://localhost:8002
 ```
 
-ros2_control and controllers:
+---
 
-```bash
-sudo apt-get install -y \
-  ros-humble-ros2-control \
-  ros-humble-ros2-controllers \
-  ros-humble-controller-manager \
-  ros-humble-ign-ros2-control
-```
+## Pestañas de la interfaz
 
-Joystick / teleoperation / mux:
-
-```bash
-sudo apt-get install -y \
-  ros-humble-joy \
-  ros-humble-joy-teleop \
-  ros-humble-twist-mux
-```
-
-<!-- SLAM toolbox (used by `puzzlebot_mapping`):
-
-```bash
-sudo apt-get install -y \
-  ros-humble-slam-toolbox
-``` -->
-
-Python dependencies:
-
-```bash
-pip install numpy scipy
-```
-
-#### Build and source the workspace
-
-```bash
-git clone https://github.com/Hugo734/Puzzlebot-Challenge-.git
-cd Puzzlebot-Challenge-
-colcon build --packages-select puzzlebot_description
-source install/setup.bash
-```
-
-### Demo
-
-<img src="assets/img.png" width="49%"/> <img src="assets/img1.png" width="49%"/>
-
-### Launch
-
-```bash
-ros2 launch puzzlebot_description week1.launch.py
-```
-
-### What it runs
-
-| Node | Description |
+| Pestaña | Descripción |
 |---|---|
-| `robot_state_publisher` | Loads the URDF and publishes the robot TF tree |
-| `circular_motion.py` | Moves the robot in a circle (radius 0.5 m) and spins the wheels |
-| `rviz2` | Visualizes the robot with `odom` as the fixed frame |
+| **MAPA** | Vista de planta con LIDAR sintético, pose real del robot y waypoints. Haz clic en el mapa para añadir waypoints. |
+| **CÁMARA** | Stream en vivo MJPEG desde `/image_result`. Muestra "Sin señal" si el wrapper no está corriendo. |
+| **TELEOP** | Control por teclado, barras de velocidad, batería y E-Stop. |
+
+---
+
+## Controles de teclado (pestaña TELEOP)
+
+| Tecla | Acción |
+|---|---|
+| `W` / `↑` | Avanzar |
+| `S` / `↓` | Retroceder |
+| `A` / `←` | Girar izquierda |
+| `D` / `→` | Girar derecha |
+| `Shift` | Boost (×1.6) |
+| `Espacio` | E-Stop (alterna armado/detenido) |
+
+---
+
+## Topics ROS 2 utilizados
+
+| Topic | Tipo | Dirección |
+|---|---|---|
+| `/odom` | `nav_msgs/Odometry` | Suscripción |
+| `/image_result` | `sensor_msgs/Image` | Suscripción |
+| `/cmd_vel` | `geometry_msgs/Twist` | Publicación |
+
+---
+
+## Regenerar los protobuf (solo si se modifica el `.proto`)
+
+```bash
+cd /home/rosendorios/Desktop/Modulo3/UI/PY-RPC-Wrapper-Server-Linux
+python3 -m grpc_tools.protoc -I./protos \
+    --python_out=../generated_protos \
+    --grpc_python_out=../generated_protos \
+    ./protos/rpc-demo.proto
+```

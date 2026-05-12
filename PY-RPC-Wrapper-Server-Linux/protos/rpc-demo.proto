@@ -1,0 +1,23 @@
+//author AECL
+
+syntax = "proto3";
+import "google/protobuf/empty.proto";
+package RPCDemoPkg;
+
+service RPCDemo {
+    rpc GetMultCoords (google.protobuf.Empty) returns (MultCoords){
+        };
+
+    rpc GetImageResult (google.protobuf.Empty) returns (ImageResult){
+        };
+}
+
+message MultCoords {
+    repeated double values = 1 [packed=true]; 
+}
+
+message ImageResult {
+    bytes b64img = 1;
+    uint32 width = 2; 
+    uint32 height = 3;
+}
