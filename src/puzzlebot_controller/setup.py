@@ -29,6 +29,7 @@ setup(
             'simple_controller = puzzlebot_controller.simple_controller:main',
             'noisy_controller = puzzlebot_controller.noisy_controller:main',
             'twist_relay = puzzlebot_controller.twist_relay:main',
+            'lifter_controller = puzzlebot_controller.lifter_controller:main',
         ],
     },
 )
