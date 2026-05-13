@@ -12,6 +12,10 @@ controller_manager:
     simple_velocity_controller:
       type: velocity_controllers/JointGroupVelocityController
 
+gz_ros2_control:
+  ros__parameters:
+    position_proportional_gain: 50.0
+
 puzzlebot_controller:
   ros__parameters:
     publish_rate: 50.0

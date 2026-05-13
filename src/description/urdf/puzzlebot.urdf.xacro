@@ -6,10 +6,10 @@
   <xacro:arg name="is_sim" default="true"/>
 
   <!-- Include Gazebo plugins -->
-  <xacro:include filename="$(find puzzlebot_description)/urdf/puzzlebot_gazebo.xacro" />
+  <xacro:include filename="$(find description)/urdf/puzzlebot_gazebo.xacro" />
 
   <!-- Include ros2_control -->
-  <xacro:include filename="$(find puzzlebot_description)/urdf/puzzlebot_ros2_control.xacro" />
+  <xacro:include filename="$(find description)/urdf/puzzlebot_ros2_control.xacro" />
 
   <!-- ==================== PROPERTIES ==================== -->
   <xacro:property name="wheel_radius" value="0.05"/>
@@ -56,7 +56,7 @@
     <xacro:box_inertia m="${base_mass}" x="0.2" y="0.15" z="0.06"/>
     <visual>
       <geometry>
-        <mesh filename="package://puzzlebot_description/meshes/Puzzlebot_Jetson_Lidar_Edition_Base.stl"/>
+        <mesh filename="package://description/meshes/Puzzlebot_Jetson_Lidar_Edition_Base.stl"/>
       </geometry>
       <material name="dark_grey">
         <color rgba="0.3 0.3 0.3 1.0"/>
@@ -75,7 +75,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="-1.5708 0 0"/>
       <geometry>
-        <mesh filename="package://puzzlebot_description/meshes/Puzzlebot_Wheel.stl"/>
+        <mesh filename="package://description/meshes/Puzzlebot_Wheel.stl"/>
       </geometry>
       <material name="grey">
         <color rgba="0.5 0.5 0.5 1.0"/>
@@ -95,7 +95,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
-        <mesh filename="package://puzzlebot_description/meshes/Puzzlebot_Wheel.stl"/>
+        <mesh filename="package://description/meshes/Puzzlebot_Wheel.stl"/>
       </geometry>
       <material name="grey">
         <color rgba="0.5 0.5 0.5 1.0"/>
@@ -110,19 +110,23 @@
   </link>
 
   <!-- Caster wheel -->
+  <!-- Link origin is at the bracket mount point.
+       Ball center is +0.0057m above origin (from mesh analysis),
+       ball radius is 0.0115m. Collision sphere is offset to ball center. -->
   <link name="caster_link">
-    <xacro:sphere_inertia m="${caster_mass}" r="0.015"/>
+    <xacro:sphere_inertia m="${caster_mass}" r="0.0115"/>
     <visual>
       <geometry>
-        <mesh filename="package://puzzlebot_description/meshes/Puzzlebot_Caster_Wheel.stl"/>
+        <mesh filename="package://description/meshes/Puzzlebot_Caster_Wheel.stl"/>
       </geometry>
       <material name="grey">
         <color rgba="0.5 0.5 0.5 1.0"/>
       </material>
     </visual>
     <collision>
+      <origin xyz="0 0 0.0057" rpy="0 0 0"/>
       <geometry>
-        <sphere radius="0.015"/>
+        <sphere radius="0.0115"/>
       </geometry>
     </collision>
   </link>
@@ -190,7 +194,7 @@
   <joint name="wheel_right_joint" type="continuous">
     <parent link="base_link"/>
     <child link="wheel_right_link"/>
-    <origin xyz="0.052 -0.095 -0.0025" rpy="0.0 0.0 0.0"/>
+    <origin xyz="0.052 -0.095 0.0" rpy="0.0 0.0 0.0"/>
     <axis xyz="0 1 0"/>
   </joint>
 
@@ -198,15 +202,17 @@
   <joint name="wheel_left_joint" type="continuous">
     <parent link="base_link"/>
     <child link="wheel_left_link"/>
-    <origin xyz="0.052 0.095 -0.0025" rpy="0.0 0.0 0.0"/>
+    <origin xyz="0.052 0.095 0.0" rpy="0.0 0.0 0.0"/>
     <axis xyz="0 1 0"/>
   </joint>
 
   <!-- base_link -> caster_link -->
+  <!-- z=-0.0442: places ball bottom (mesh z_min=-0.0058) at world z=0 when
+       base_link is at z=0.05 and drive wheels (r=0.05) rest on the ground. -->
   <joint name="caster_joint" type="fixed">
     <parent link="base_link"/>
     <child link="caster_link"/>
-    <origin xyz="-0.095 0.0 -0.03" rpy="0.0 0.0 0.0"/>
+    <origin xyz="-0.095 0.0 -0.0432" rpy="0.0 0.0 0.0"/>
   </joint>
 
   <!-- base_link -> lidar_link -->

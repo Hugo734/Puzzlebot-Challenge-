@@ -36,18 +36,15 @@
   <gazebo>
     <xacro:if value="$(arg is_ignition)">
       <plugin filename="ign_ros2_control-system" name="ign_ros2_control::IgnitionROS2ControlPlugin">
-        <parameters>$(find puzzlebot_controller)/config/puzzlebot_controllers.yaml</parameters>
+        <parameters>$(find controller)/config/puzzlebot_controllers.yaml</parameters>
       </plugin>
-      <plugin filename="ignition-gazebo-imu-system" name="ignition::gazebo::systems::Imu">
-      </plugin>
-      <plugin filename="ignition-gazebo-sensors-system" name="ignition::gazebo::systems::Sensors">
-        <render_engine>ogre2</render_engine>
-      </plugin>
+      <!-- IMU and Sensors (ogre2) plugins omitted: gpu rendering unavailable
+           in this headless environment. Re-enable when running on the Jetson. -->
     </xacro:if>
 
     <xacro:unless value="$(arg is_ignition)">
       <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
-        <parameters>$(find puzzlebot_controller)/config/puzzlebot_controllers.yaml</parameters>
+        <parameters>$(find controller)/config/puzzlebot_controllers.yaml</parameters>
       </plugin>
       <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu">
       </plugin>
@@ -109,7 +106,7 @@
     </sensor>
   </gazebo>
 
-  <!-- 2D Lidar sensor -->
+  <!-- 2D Lidar sensor (gpu_lidar uses render engine for raycasting in Ignition) -->
   <gazebo reference="lidar_link">
     <sensor name="lidar" type="gpu_lidar">
       <always_on>true</always_on>
@@ -128,7 +125,7 @@
         </scan>
         <range>
           <min>0.12</min>
-          <max>12.0</max>
+          <max>20.0</max>
           <resolution>0.02</resolution>
         </range>
         <noise>
