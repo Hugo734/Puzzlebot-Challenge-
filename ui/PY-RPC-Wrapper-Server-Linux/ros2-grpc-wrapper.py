@@ -12,7 +12,8 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, OccupancyGrid
+from std_msgs.msg import String
 import math
 from cv_bridge import CvBridge
 
@@ -36,10 +37,14 @@ class RPCDemoImpl(rpc_demo_pb2_grpc.RPCDemoServicer):
         self.br = CvBridge()
         self.cmd_linear = 0.0
         self.cmd_angular = 0.0
+        self.map_data = None
+        self.publishing_enabled = False
 
         self.node.create_subscription(Odometry, '/odom', self.update_odom, 10)
-        self.node.create_subscription(Image, '/image_result', self.update_image, 10)
+        self.node.create_subscription(Image, '/video_source/raw', self.update_image, 10)
+        self.node.create_subscription(OccupancyGrid, '/map', self.update_map, 10)
         self.cmd_vel_pub = self.node.create_publisher(Twist, '/cmd_vel', 10)
+        self.lifter_pub = self.node.create_publisher(String, '/lifter/command', 10)
         print("Initialized gRPC Server")
 
     def update_odom(self, msg):
@@ -52,6 +57,18 @@ class RPCDemoImpl(rpc_demo_pb2_grpc.RPCDemoServicer):
             self.data[1] = msg.pose.pose.position.y
             self.data[2] = yaw
 
+    def update_map(self, msg):
+        with self.lock:
+            self.map_data = {
+                'loaded': True,
+                'width': msg.info.width,
+                'height': msg.info.height,
+                'resolution': msg.info.resolution,
+                'origin_x': msg.info.origin.position.x,
+                'origin_y': msg.info.origin.position.y,
+                'data': list(msg.data),
+            }
+
     def update_image(self, msg):
         img_original = self.br.imgmsg_to_cv2(msg)
         self.shape = img_original.shape
@@ -62,8 +79,10 @@ class RPCDemoImpl(rpc_demo_pb2_grpc.RPCDemoServicer):
             self.img_compressed = compressed
 
     def publish_cmd_vel(self):
-        twist = Twist()
         with self.lock:
+            if not self.publishing_enabled:
+                return
+            twist = Twist()
             twist.linear.x = self.cmd_linear
             twist.angular.z = self.cmd_angular
         self.cmd_vel_pub.publish(twist)
@@ -103,6 +122,21 @@ class WrapperHTTPHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(frame)
 
+        elif self.path == '/map':
+            with self.service.lock:
+                m = self.service.map_data
+            if m is None:
+                self.send_response(503)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                return
+            body = _json.dumps(m).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(body)
+
         elif self.path == '/odom':
             with self.service.lock:
                 d = list(self.service.data)
@@ -133,6 +167,49 @@ class WrapperHTTPHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
+
+        elif self.path == '/teleop/enable':
+            with self.service.lock:
+                self.service.publishing_enabled = True
+                self.service.cmd_linear = 0.0
+                self.service.cmd_angular = 0.0
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(b'{"ok":true,"publishing_enabled":true}')
+
+        elif self.path == '/teleop/disable':
+            with self.service.lock:
+                self.service.publishing_enabled = False
+                self.service.cmd_linear = 0.0
+                self.service.cmd_angular = 0.0
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(b'{"ok":true,"publishing_enabled":false}')
+
+        elif self.path == '/lifter':
+            length = int(self.headers.get('Content-Length', 0))
+            body = _json.loads(self.rfile.read(length) or b'{}')
+            cmd = body.get('command', '').strip().lower()
+            if cmd in ('raise', 'lower', 'stop'):
+                msg = String()
+                msg.data = cmd
+                self.service.lifter_pub.publish(msg)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(_json.dumps({"ok": True, "command": cmd}).encode())
+            else:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(b'{"ok":false,"error":"Invalid command"}')
+
         else:
             self.send_response(404)
             self.end_headers()

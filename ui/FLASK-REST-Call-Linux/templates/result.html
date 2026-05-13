@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <title>Puzzlebot · Control</title>
@@ -28,6 +28,8 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -109,102 +111,115 @@ function Key({k,active,label}){
   );
 }
 
-/* ─── SLAM map (synthetic lidar + real pose) ─── */
-function MapView({pose,waypoints,onAdd,onClear}){
-  const ref=useRef(null);
+/* ─── Live map (OccupancyGrid canvas + pose overlay) ─── */
+function MapView({pose,waypoints,onAdd,onClear,mapData}){
+  const containerRef=useRef(null);
+  const canvasRef=useRef(null);
   const [sz,setSz]=useState({w:600,h:420});
+
   useEffect(()=>{
-    if(!ref.current) return;
+    if(!containerRef.current) return;
     const ro=new ResizeObserver(([e])=>{
       const r=e.contentRect;
       setSz({w:Math.max(100,r.width),h:Math.max(100,r.height)});
     });
-    ro.observe(ref.current); return()=>ro.disconnect();
+    ro.observe(containerRef.current); return()=>ro.disconnect();
   },[]);
 
-  const W=12,H=8;
-  const sx=sz.w/W, sy=sz.h/H;
-  const px=(x,y)=>[x*sx, sz.h-y*sy];
+  const hasMap=mapData&&mapData.loaded;
 
-  const walls=useMemo(()=>[
-    [[.8,.8],[11.2,.8],[11.2,7.2],[.8,7.2],[.8,.8]],
-    [[2.5,2],[5,2],[5,4.2],[2.5,4.2],[2.5,2]],
-    [[7,4.5],[10,4.5],[10,6.5],[7,6.5],[7,4.5]],
-    [[5.8,1.5],[6.3,1.5],[6.3,2.2],[5.8,2.2],[5.8,1.5]],
-  ],[]);
-
-  const rays=useMemo(()=>{
-    const N=140,R=4,out=[];
-    for(let i=0;i<N;i++){
-      const a=pose.theta+(i/N)*Math.PI*2;
-      const dx=Math.cos(a),dy=Math.sin(a);
-      let r=.1,hit=false;
-      while(r<R&&!hit){
-        const qx=pose.x+dx*r, qy=pose.y+dy*r;
-        for(const w of walls){
-          for(let k=0;k<w.length-1;k++){
-            const[x1,y1]=w[k],[x2,y2]=w[k+1];
-            const ax=x2-x1,ay=y2-y1,bx=qx-x1,by=qy-y1;
-            const t=Math.max(0,Math.min(1,(ax*bx+ay*by)/(ax*ax+ay*ay||1)));
-            if(Math.hypot(qx-x1-ax*t,qy-y1-ay*t)<.055){hit=true;break;}
-          }
-          if(hit) break;
+  /* Render OccupancyGrid onto canvas whenever map data changes */
+  useEffect(()=>{
+    if(!canvasRef.current||!hasMap) return;
+    const canvas=canvasRef.current;
+    const ctx=canvas.getContext('2d');
+    const {width,height,data}=mapData;
+    canvas.width=width;
+    canvas.height=height;
+    const img=ctx.createImageData(width,height);
+    for(let row=0;row<height;row++){
+      for(let col=0;col<width;col++){
+        const v=data[row*width+col];
+        /* flip Y: ROS row-0 = world bottom, canvas row-0 = screen top */
+        const base=((height-1-row)*width+col)*4;
+        if(v===-1){
+          img.data[base]=55;img.data[base+1]=58;img.data[base+2]=65;img.data[base+3]=220;
+        }else if(v===0){
+          img.data[base]=18;img.data[base+1]=20;img.data[base+2]=24;img.data[base+3]=255;
+        }else{
+          /* occupied (walls) — bright on dark theme */
+          img.data[base]=200;img.data[base+1]=205;img.data[base+2]=210;img.data[base+3]=255;
         }
-        r+=.065;
       }
-      out.push([a, Math.min(r,R)+(Math.random()-.5)*.018]);
     }
-    return out;
-  },[pose.x,pose.y,pose.theta,walls]);
+    ctx.putImageData(img,0,0);
+  },[mapData,hasMap]);
 
-  const [rpx,rpy]=px(pose.x,pose.y);
+  /* World → screen coords (with fallback when no map) */
+  const FALLBACK_SCALE=50; /* px per metre */
+  const w2s=useCallback((wx,wy)=>{
+    if(hasMap){
+      const {width,height,resolution,origin_x,origin_y}=mapData;
+      return[
+        (wx-origin_x)/resolution*sz.w/width,
+        (height-(wy-origin_y)/resolution)*sz.h/height,
+      ];
+    }
+    return[sz.w/2+wx*FALLBACK_SCALE, sz.h/2-wy*FALLBACK_SCALE];
+  },[hasMap,mapData,sz]);
+
+  const handleClick=useCallback((e)=>{
+    const r=containerRef.current.getBoundingClientRect();
+    const cx=e.clientX-r.left, cy=e.clientY-r.top;
+    if(hasMap){
+      const {width,height,resolution,origin_x,origin_y}=mapData;
+      onAdd({
+        x:(cx*width/sz.w)*resolution+origin_x,
+        y:((height-cy*height/sz.h))*resolution+origin_y,
+      });
+    }else{
+      onAdd({x:(cx-sz.w/2)/FALLBACK_SCALE, y:(sz.h/2-cy)/FALLBACK_SCALE});
+    }
+  },[hasMap,mapData,sz,onAdd]);
+
+  const [rpx,rpy]=w2s(pose.x,pose.y);
 
   return(
-    <div ref={ref} onClick={e=>{
-      const r=ref.current.getBoundingClientRect();
-      onAdd({x:(e.clientX-r.left)/sx, y:(sz.h-(e.clientY-r.top))/sy});
-    }} style={{
+    <div ref={containerRef} onClick={handleClick} style={{
       position:'relative',width:'100%',flex:1,
       background:'#0c0c0e',borderRadius:10,overflow:'hidden',cursor:'crosshair',
     }}>
+      {/* OccupancyGrid bitmap */}
+      <canvas ref={canvasRef} style={{
+        position:'absolute',inset:0,width:'100%',height:'100%',
+        imageRendering:'pixelated',opacity:hasMap?1:0,
+      }}/>
+
+      {/* SVG overlay: grid (fallback), trail, waypoints, robot */}
       <svg width={sz.w} height={sz.h} style={{display:'block',position:'absolute',inset:0}}>
         <defs>
-          <pattern id="g1" width={sx*.5} height={sy*.5} patternUnits="userSpaceOnUse">
-            <path d={`M ${sx*.5} 0 L 0 0 0 ${sy*.5}`} fill="none" stroke="rgba(255,255,255,.04)" strokeWidth=".5"/>
+          <pattern id="g1" width="20" height="20" patternUnits="userSpaceOnUse">
+            <path d="M 20 0 L 0 0 0 20" fill="none" stroke="rgba(255,255,255,.04)" strokeWidth=".5"/>
           </pattern>
-          <pattern id="g2" width={sx} height={sy} patternUnits="userSpaceOnUse">
-            <path d={`M ${sx} 0 L 0 0 0 ${sy}`} fill="none" stroke="rgba(255,255,255,.07)" strokeWidth=".8"/>
+          <pattern id="g2" width="80" height="80" patternUnits="userSpaceOnUse">
+            <path d="M 80 0 L 0 0 0 80" fill="none" stroke="rgba(255,255,255,.07)" strokeWidth=".8"/>
           </pattern>
         </defs>
-        <rect width={sz.w} height={sz.h} fill="url(#g1)"/>
-        <rect width={sz.w} height={sz.h} fill="url(#g2)"/>
-
-        {walls.map((w,i)=>(
-          <polyline key={i} fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.2)" strokeWidth="1.5"
-            points={w.map(p=>px(p[0],p[1]).join(',')).join(' ')}/>
-        ))}
-
-        <polygon fill="rgba(52,211,153,.07)"
-          points={[[rpx,rpy],...rays.map(([a,r])=>px(pose.x+Math.cos(a)*r,pose.y+Math.sin(a)*r))].map(p=>p.join(',')).join(' ')}/>
-        {rays.map(([a,r],i)=>{
-          const [qx,qy]=px(pose.x+Math.cos(a)*r,pose.y+Math.sin(a)*r);
-          return <circle key={i} cx={qx} cy={qy} r="1.2" fill="var(--accent)" opacity={r>=3.9?.2:.85}/>;
-        })}
+        {!hasMap&&<rect width={sz.w} height={sz.h} fill="url(#g1)"/>}
+        {!hasMap&&<rect width={sz.w} height={sz.h} fill="url(#g2)"/>}
 
         {pose.trail&&pose.trail.length>1&&(
           <polyline fill="none" stroke="rgba(251,191,36,.45)" strokeWidth="1.2" strokeDasharray="2 4"
-            points={pose.trail.map(p=>px(p.x,p.y).join(',')).join(' ')}/>
+            points={pose.trail.map(p=>w2s(p.x,p.y).join(',')).join(' ')}/>
         )}
 
         {waypoints.map((w,i)=>{
-          const [wpx,wpy]=px(w.x,w.y);
+          const [wpx,wpy]=w2s(w.x,w.y);
           return(
             <g key={i}>
               <circle cx={wpx} cy={wpy} r="10" fill="none" stroke="var(--accent2)" strokeWidth="1.2"/>
               <circle cx={wpx} cy={wpy} r="3" fill="var(--accent2)"/>
-              <text x={wpx+13} y={wpy+3.5} fontSize="9" fontFamily="var(--mono)" fill="var(--accent2)" fontWeight="700">
-                WP{i+1}
-              </text>
+              <text x={wpx+13} y={wpy+3.5} fontSize="9" fontFamily="var(--mono)" fill="var(--accent2)" fontWeight="700">WP{i+1}</text>
             </g>
           );
         })}
@@ -218,21 +233,42 @@ function MapView({pose,waypoints,onAdd,onClear}){
         </g>
       </svg>
 
+      {/* No-map placeholder */}
+      {!hasMap&&(
+        <div style={{position:'absolute',inset:0,display:'flex',flexDirection:'column',
+          alignItems:'center',justifyContent:'center',gap:10,pointerEvents:'none'}}>
+          <svg width="40" height="40" viewBox="0 0 40 40" fill="none" style={{opacity:.2}}>
+            <rect x="2" y="2" width="36" height="36" rx="3" stroke="white" strokeWidth="1.2"/>
+            <path d="M8 28 L14 18 L20 24 L27 12 L35 22" stroke="white" strokeWidth="1.2" fill="none"/>
+          </svg>
+          <span style={{fontFamily:'var(--mono)',fontSize:10,letterSpacing:'.12em',
+            color:'rgba(255,255,255,.2)'}}>WAITING FOR /map TOPIC</span>
+        </div>
+      )}
+
+      {/* Top-left HUD */}
       <div style={{position:'absolute',top:10,left:14,fontFamily:'var(--mono)',fontSize:10,
-        color:'var(--dim)',letterSpacing:'.08em'}}>
-        <div>/scan · /odom · /map</div>
+        color:'var(--dim)',letterSpacing:'.08em',pointerEvents:'none'}}>
+        <div>/odom · /map{hasMap&&` · ${mapData.width}×${mapData.height}`}</div>
         <div style={{marginTop:3}}>
           x <b style={{color:'var(--text)'}}>{pose.x.toFixed(2)}</b> &nbsp;
           y <b style={{color:'var(--text)'}}>{pose.y.toFixed(2)}</b> &nbsp;
           θ <b style={{color:'var(--text)'}}>{(pose.theta*180/Math.PI).toFixed(1)}°</b>
         </div>
       </div>
+
+      {/* Bottom bar */}
       <div style={{position:'absolute',bottom:10,left:14,right:14,
         display:'flex',justifyContent:'space-between',
         fontFamily:'var(--mono)',fontSize:9.5,color:'var(--mute)',letterSpacing:'.1em'}}>
-        <span><span style={{color:'var(--accent)'}}>●</span> LIDAR &nbsp;<span style={{color:'var(--accent2)'}}>●</span> WP</span>
+        <span>
+          <span style={{color:'var(--accent2)'}}>●</span> WP
+          {hasMap&&<span style={{marginLeft:10,color:'rgba(255,255,255,.25)'}}>
+            {mapData.resolution.toFixed(3)} m/px
+          </span>}
+        </span>
         <span style={{display:'flex',gap:10,alignItems:'center'}}>
-          <span>CLICK = AÑADIR WP</span>
+          <span>CLICK = ADD WP</span>
           {waypoints.length>0&&(
             <button onClick={e=>{e.stopPropagation();onClear();}} style={{
               background:'transparent',border:'1px solid var(--border2)',color:'var(--dim)',
@@ -275,9 +311,9 @@ function CamView(){
             <circle cx="22" cy="22" r="2.5" fill="currentColor"/>
             <path d="M14 9 L17 5 L27 5 L30 9" stroke="currentColor" strokeWidth="1.5" fill="none"/>
           </svg>
-          <span>{error?'Sin señal de cámara':'Conectando cámara...'}</span>
+          <span>{error?'No camera signal':'Connecting camera...'}</span>
           <span style={{fontSize:9,letterSpacing:'.1em',color:'rgba(255,255,255,.1)'}}>
-            {error?'Verifica que ros2-grpc-wrapper.py esté corriendo':'MJPEG · /api/camera'}
+            {error?'Check that ros2-grpc-wrapper.py is running':'MJPEG · /api/camera'}
           </span>
         </div>
       )}
@@ -288,7 +324,7 @@ function CamView(){
         fontFamily:'var(--mono)',fontSize:9.5,letterSpacing:'.08em',
         color:'rgba(255,255,255,.4)',pointerEvents:'none',
       }}>
-        <span>/camera/image_result · ROS2</span>
+        <span>/video_source/raw · ROS2</span>
         <span style={{display:'flex',gap:6,alignItems:'center',
           color:loaded&&!error?'var(--danger)':'rgba(255,255,255,.2)'}}>
           {loaded&&!error&&<span style={{
@@ -349,24 +385,159 @@ function TeleValue({label,value,unit,color,spark}){
   );
 }
 
+/* ─── 3D Robot Visualization with URDF ─── */
+function RobotView3D({pose}){
+  const containerRef=useRef(null);
+  const sceneRef=useRef({robot:null,renderer:null});
+  const [urdfLoaded,setUrdfLoaded]=useState(false);
+
+  useEffect(()=>{
+    const el=containerRef.current;
+    if(!el) return;
+
+    const THREE=window.THREE;
+    const w=el.clientWidth, h=el.clientHeight;
+
+    try {
+      const scene=new THREE.Scene();
+      scene.background=new THREE.Color(0x0c0c0e);
+
+      const camera=new THREE.PerspectiveCamera(45, w/h, 0.1, 100);
+      camera.position.set(0.8, 0.8, 0.8);
+      camera.lookAt(0, 0.1, 0);
+
+      const renderer=new THREE.WebGLRenderer({antialias:true});
+      renderer.setSize(w, h);
+      renderer.setClearColor(0x0c0c0e);
+      el.appendChild(renderer.domElement);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+      scene.add(new THREE.DirectionalLight(0xffffff, 1.0));
+
+      const robotGroup=new THREE.Group();
+      scene.add(robotGroup);
+
+      sceneRef.current={robot:robotGroup, renderer, scene, camera};
+
+      /* Try to load URDF */
+      fetch('/api/urdf/puzzlebot_with_lifter.urdf.xacro')
+        .then(r=>r.text())
+        .then(urdfText=>{
+          const parser=new DOMParser();
+          const doc=parser.parseFromString(urdfText, 'application/xml');
+          const meshes=doc.querySelectorAll('mesh');
+
+          let meshesLoaded=0;
+          const stlLoader=new THREE.STLLoader();
+
+          meshes.forEach(mesh=>{
+            let filename=mesh.getAttribute('filename');
+            if(!filename) return;
+
+            filename=filename.replace('package://puzzlebot_description/','').split('/').pop();
+            const meshPath=`/api/mesh/${filename}`;
+
+            stlLoader.load(meshPath,
+              geo=>{
+                const mat=new THREE.MeshPhongMaterial({color:0x888899});
+                const m=new THREE.Mesh(geo, mat);
+                m.scale.set(0.001, 0.001, 0.001);
+                robotGroup.add(m);
+                meshesLoaded++;
+                if(meshesLoaded===meshes.length) setUrdfLoaded(true);
+              },
+              null,
+              ()=>{
+                meshesLoaded++;
+                if(meshesLoaded===meshes.length) setUrdfLoaded(true);
+              }
+            );
+          });
+
+          if(meshes.length===0) createFallback();
+        })
+        .catch(()=>createFallback());
+
+      function createFallback(){
+        const base=new THREE.Mesh(
+          new THREE.BoxGeometry(0.25, 0.1, 0.20),
+          new THREE.MeshPhongMaterial({color:0x34d399})
+        );
+        base.position.y=0.05;
+        robotGroup.add(base);
+
+        const mast=new THREE.Mesh(
+          new THREE.BoxGeometry(0.05, 0.25, 0.05),
+          new THREE.MeshPhongMaterial({color:0x7aa9ff})
+        );
+        mast.position.y=0.15;
+        robotGroup.add(mast);
+
+        const arrow=new THREE.Mesh(
+          new THREE.ConeGeometry(0.04, 0.12, 8),
+          new THREE.MeshPhongMaterial({color:0xfbbf24})
+        );
+        arrow.position.set(0, 0.08, -0.15);
+        robotGroup.add(arrow);
+      }
+
+      const render=()=>{
+        requestAnimationFrame(render);
+        renderer.render(scene, camera);
+      };
+      render();
+
+      return()=>{
+        if(el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
+        renderer.dispose();
+      };
+    }catch(e){
+      console.error('3D render error:', e);
+    }
+  },[]);
+
+  useEffect(()=>{
+    const {robot}=sceneRef.current;
+    if(!robot) return;
+    robot.position.x=pose.x;
+    robot.position.z=pose.y;
+    robot.rotation.y=-pose.theta;
+  },[pose]);
+
+  return(
+    <div style={{position:'relative',width:'100%',height:300}}>
+      <div ref={containerRef} style={{width:'100%',height:'100%',borderRadius:10,overflow:'hidden',background:'#0c0c0e',border:'1px solid var(--border)'}}/>
+      {!urdfLoaded&&<div style={{position:'absolute',top:10,left:14,fontFamily:'var(--mono)',fontSize:9,color:'rgba(255,255,255,.3)'}}>Loading URDF...</div>}
+    </div>
+  );
+}
+
 /* ─── Main App ─── */
 function App(){
-  const [tab,setTab]=useState('camara');
+  const [tab,setTab]=useState('camera');
   const [keys,setKeys]=useState({w:false,a:false,s:false,d:false,shift:false});
   const [eStop,setEStop]=useState(false);
-  // Pose comes from real odom; start at map center
-  const [pose,setPose]=useState({x:6.0,y:4.0,theta:0,trail:[]});
+  const [teleOpEnabled,setTeleOpEnabled]=useState(false);
+  const [pose,setPose]=useState({x:0,y:0,theta:0,trail:[]});
   const [waypoints,setWaypoints]=useState([]);
   const [uptime,setUptime]=useState(0);
   const [vel,setVel]=useState({lin:0,ang:0});
   const [rosConnected,setRosConnected]=useState(false);
+  const [mapData,setMapData]=useState({loaded:false});
 
   const velRef=useRef({lin:0,ang:0});
   const keysRef=useRef(keys);    useEffect(()=>{keysRef.current=keys;},[keys]);
   const eStopRef=useRef(eStop);  useEffect(()=>{eStopRef.current=eStop;},[eStop]);
+  const teleOpRef=useRef(teleOpEnabled); useEffect(()=>{teleOpRef.current=teleOpEnabled;},[teleOpEnabled]);
   const maxL=0.6, maxA=1.4;
 
-  /* velocity smoothing loop (drives visual feedback + cmd_vel) */
+  /* toggle teleop mode on wrapper */
+  useEffect(()=>{
+    const endpoint=teleOpEnabled?'/api/teleop/enable':'/api/teleop/disable';
+    fetch(endpoint,{method:'POST'}).catch(()=>{});
+  },[teleOpEnabled]);
+
+  /* velocity smoothing loop */
   useEffect(()=>{
     let raf, last=performance.now();
     const tick=now=>{
@@ -387,20 +558,21 @@ function App(){
     return()=>cancelAnimationFrame(raf);
   },[]);
 
-  /* send cmd_vel to robot at 10 Hz */
+  /* send cmd_vel at 10 Hz (only when teleop is enabled) */
   useEffect(()=>{
+    if(!teleOpEnabled) return;
     const id=setInterval(()=>{
       const v=velRef.current;
       fetch('/api/cmd_vel',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({linear:parseFloat(v.lin.toFixed(4)), angular:parseFloat(v.ang.toFixed(4))})
+        body:JSON.stringify({linear:parseFloat(v.lin.toFixed(4)),angular:parseFloat(v.ang.toFixed(4))})
       }).catch(()=>{});
     },100);
     return()=>clearInterval(id);
-  },[]);
+  },[teleOpEnabled]);
 
-  /* poll real odometry */
+  /* poll odometry */
   useEffect(()=>{
     const id=setInterval(()=>{
       fetch('/api/odom')
@@ -410,14 +582,24 @@ function App(){
           setPose(prev=>{
             const moved=Math.hypot(d.x-prev.x,d.y-prev.y)>0.015;
             const trail=moved?[...prev.trail.slice(-200),{x:prev.x,y:prev.y}]:prev.trail;
-            // clamp to map bounds for display
-            const mx=Math.max(.5,Math.min(11.5,d.x+6.0));
-            const my=Math.max(.5,Math.min(7.5,d.y+4.0));
-            return{x:mx,y:my,theta:d.theta,trail};
+            return{x:d.x,y:d.y,theta:d.theta,trail};
           });
         })
         .catch(()=>setRosConnected(false));
     },200);
+    return()=>clearInterval(id);
+  },[]);
+
+  /* poll /map every 3 s */
+  useEffect(()=>{
+    const fetchMap=()=>{
+      fetch('/api/map')
+        .then(r=>r.json())
+        .then(d=>{if(d.loaded) setMapData(d);})
+        .catch(()=>{});
+    };
+    fetchMap();
+    const id=setInterval(fetchMap,3000);
     return()=>clearInterval(id);
   },[]);
 
@@ -442,7 +624,6 @@ function App(){
   },[]);
 
   const now=useNow(1000);
-  const battery=Math.max(20,87-uptime/120);
   const linBuf=useRoll(useCallback(()=>Math.abs(velRef.current.lin)+(Math.random()-.5)*.03,[]),60,250);
   const angBuf=useRoll(useCallback(()=>Math.abs(velRef.current.ang)+(Math.random()-.5)*.04,[]),60,250);
   const cpuBuf=useRoll(useCallback((_,k)=>22+Math.sin(k*.3)*9+Math.random()*4,[]),60,400);
@@ -461,7 +642,7 @@ function App(){
         </div>
 
         <nav style={{display:'flex',gap:2,marginLeft:16}}>
-          {[{id:'mapa',label:'MAPA'},{id:'camara',label:'CÁMARA'},{id:'teleop',label:'TELEOP'}].map(t=>(
+          {[{id:'map',label:'MAP'},{id:'robot',label:'ROBOT'},{id:'camera',label:'CAMERA'},{id:'teleop',label:'TELEOP'}].map(t=>(
             <button key={t.id} onClick={()=>setTab(t.id)} style={{
               padding:'6px 18px',background:'transparent',cursor:'pointer',
               fontFamily:'var(--mono)',fontSize:10.5,letterSpacing:'.12em',
@@ -492,6 +673,18 @@ function App(){
           <span style={{
             display:'inline-flex',gap:6,alignItems:'center',
             fontFamily:'var(--mono)',fontSize:9.5,letterSpacing:'.08em',
+            color:teleOpEnabled?'var(--accent2)':'rgba(255,255,255,.2)',
+            padding:'4px 10px',borderRadius:999,
+            border:`1px solid ${teleOpEnabled?'var(--accent2)':'rgba(255,255,255,.15)'}`,
+          }}>
+            <span style={{width:6,height:6,borderRadius:'50%',
+              background:teleOpEnabled?'var(--accent2)':'rgba(255,255,255,.2)',
+              animation:teleOpEnabled?'pulse 1.6s ease-in-out infinite':'none'}}/>
+            {teleOpEnabled?'TELEOP ON':'TELEOP OFF'}
+          </span>
+          <span style={{
+            display:'inline-flex',gap:6,alignItems:'center',
+            fontFamily:'var(--mono)',fontSize:9.5,letterSpacing:'.08em',
             color:eStop?'var(--danger)':'var(--accent)',
             padding:'4px 10px',borderRadius:999,
             border:`1px solid ${eStop?'var(--danger)':'var(--accent)'}`,
@@ -499,7 +692,7 @@ function App(){
             <span style={{width:6,height:6,borderRadius:'50%',
               background:eStop?'var(--danger)':'var(--accent)',
               animation:'pulse 1.6s ease-in-out infinite'}}/>
-            {eStop?'E-STOP':'ARMADO'}
+            {eStop?'E-STOP':'ARMED'}
           </span>
           <span style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--dim)',
             letterSpacing:'.08em',fontVariantNumeric:'tabular-nums'}}>{fmtTime(now)}</span>
@@ -509,33 +702,49 @@ function App(){
       {/* ── BODY ── */}
       <div style={{flex:1,minHeight:0,padding:16,display:'flex',flexDirection:'column',gap:12}}>
 
-        {/* ── TAB: MAPA ── */}
-        {tab==='mapa'&&(
+        {/* ── TAB: MAP ── */}
+        {tab==='map'&&(
           <div style={{flex:1,display:'flex',flexDirection:'column',gap:12,minHeight:0}}>
-            <MapView pose={pose} waypoints={waypoints}
+            <MapView pose={pose} waypoints={waypoints} mapData={mapData}
               onAdd={w=>setWaypoints(ws=>[...ws,w])}
               onClear={()=>setWaypoints([])}/>
             <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:10,flexShrink:0}}>
-              <TeleValue label="Posición X"    value={pose.x.toFixed(2)} unit="m"      color="var(--accent)"/>
-              <TeleValue label="Posición Y"    value={pose.y.toFixed(2)} unit="m"      color="var(--accent)"/>
-              <TeleValue label="Orientación θ" value={(pose.theta*180/Math.PI).toFixed(1)} unit="°"/>
-              <TeleValue label="Vel. Lineal"   value={vel.lin.toFixed(2)} unit="m/s"
+              <TeleValue label="Position X"   value={pose.x.toFixed(2)} unit="m"     color="var(--accent)"/>
+              <TeleValue label="Position Y"   value={pose.y.toFixed(2)} unit="m"     color="var(--accent)"/>
+              <TeleValue label="Orientation θ" value={(pose.theta*180/Math.PI).toFixed(1)} unit="°"/>
+              <TeleValue label="Lin. Vel"     value={vel.lin.toFixed(2)} unit="m/s"
                 color={vel.lin>0.05?'var(--accent)':'var(--dim)'} spark={linBuf}/>
-              <TeleValue label="Vel. Angular"  value={vel.ang.toFixed(2)} unit="rad/s"
+              <TeleValue label="Ang. Vel"     value={vel.ang.toFixed(2)} unit="rad/s"
                 color={Math.abs(vel.ang)>0.1?'var(--accent2)':'var(--dim)'} spark={angBuf}/>
             </div>
           </div>
         )}
 
-        {/* ── TAB: CÁMARA ── */}
-        {tab==='camara'&&(
+        {/* ── TAB: ROBOT ── */}
+        {tab==='robot'&&(
+          <div style={{flex:1,display:'flex',flexDirection:'column',gap:12,minHeight:0}}>
+            <RobotView3D pose={pose}/>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:10,flexShrink:0}}>
+              <TeleValue label="Position X"   value={pose.x.toFixed(2)} unit="m"     color="var(--accent)"/>
+              <TeleValue label="Position Y"   value={pose.y.toFixed(2)} unit="m"     color="var(--accent)"/>
+              <TeleValue label="Orientation θ" value={(pose.theta*180/Math.PI).toFixed(1)} unit="°"/>
+              <TeleValue label="Lin. Vel"     value={vel.lin.toFixed(2)} unit="m/s"
+                color={vel.lin>0.05?'var(--accent)':'var(--dim)'} spark={linBuf}/>
+              <TeleValue label="Ang. Vel"     value={vel.ang.toFixed(2)} unit="rad/s"
+                color={Math.abs(vel.ang)>0.1?'var(--accent2)':'var(--dim)'} spark={angBuf}/>
+            </div>
+          </div>
+        )}
+
+        {/* ── TAB: CAMERA ── */}
+        {tab==='camera'&&(
           <div style={{flex:1,display:'flex',flexDirection:'column',gap:12,minHeight:0}}>
             <CamView/>
             <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10,flexShrink:0}}>
-              <TeleValue label="Pos. X"    value={pose.x.toFixed(2)} unit="m"  color="var(--accent)"/>
-              <TeleValue label="Pos. Y"    value={pose.y.toFixed(2)} unit="m"  color="var(--accent)"/>
-              <TeleValue label="θ"         value={(pose.theta*180/Math.PI).toFixed(1)} unit="°"/>
-              <TeleValue label="Uptime"    value={fmtUp(uptime)}/>
+              <TeleValue label="Position X" value={pose.x.toFixed(2)} unit="m"  color="var(--accent)"/>
+              <TeleValue label="Position Y" value={pose.y.toFixed(2)} unit="m"  color="var(--accent)"/>
+              <TeleValue label="θ"          value={(pose.theta*180/Math.PI).toFixed(1)} unit="°"/>
+              <TeleValue label="Uptime"     value={fmtUp(uptime)}/>
             </div>
           </div>
         )}
@@ -549,23 +758,35 @@ function App(){
               background:'var(--surface)',border:'1px solid var(--border)',
               borderRadius:10,padding:24,display:'flex',flexDirection:'column',gap:20,
             }}>
-              <div style={{fontFamily:'var(--mono)',fontSize:10,letterSpacing:'.14em',
-                textTransform:'uppercase',color:'var(--mute)'}}>Control · /cmd_vel</div>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <div style={{fontFamily:'var(--mono)',fontSize:10,letterSpacing:'.14em',
+                  textTransform:'uppercase',color:'var(--mute)'}}>Control · /cmd_vel</div>
+                <button onClick={()=>setTeleOpEnabled(v=>!v)} style={{
+                  padding:'4px 10px',borderRadius:6,cursor:'pointer',
+                  fontSize:9,fontWeight:600,letterSpacing:'.1em',
+                  border:`1px solid ${teleOpEnabled?'var(--accent2)':'var(--border2)'}`,
+                  background:teleOpEnabled?'rgba(251,191,36,.12)':'transparent',
+                  color:teleOpEnabled?'var(--accent2)':'var(--mute)',
+                  transition:'all .15s',
+                }}>
+                  {teleOpEnabled?'✓ ON':'○ OFF'}
+                </button>
+              </div>
 
               <div style={{display:'grid',gridTemplateColumns:'repeat(3,44px)',gap:6,alignSelf:'center'}}>
                 <div/><Key k="W" label="FWD"   active={keys.w}/><div/>
-                <Key k="A" label="IZQ" active={keys.a}/>
-                <Key k="S" label="REV"  active={keys.s}/>
-                <Key k="D" label="DER" active={keys.d}/>
+                <Key k="A" label="LEFT"  active={keys.a}/>
+                <Key k="S" label="REV"   active={keys.s}/>
+                <Key k="D" label="RIGHT" active={keys.d}/>
               </div>
 
               <div style={{fontSize:10,fontFamily:'var(--mono)',letterSpacing:'.1em',
                 color:'var(--mute)',textAlign:'center'}}>
-                SHIFT = boost · SPACE = E-stop · ↑↓←→ también funciona
+                SHIFT = boost · SPACE = E-stop · ↑↓←→ also works
               </div>
 
               {[
-                {l:'LINEAL /cmd_vel.linear.x', v:vel.lin, max:maxL, c:'var(--accent)'},
+                {l:'LINEAR /cmd_vel.linear.x',  v:vel.lin, max:maxL, c:'var(--accent)'},
                 {l:'ANGULAR /cmd_vel.angular.z', v:vel.ang, max:maxA, c:'var(--accent2)', bipolar:true},
               ].map(({l,v,max,c,bipolar})=>(
                 <div key={l} style={{display:'flex',flexDirection:'column',gap:5}}>
@@ -598,48 +819,53 @@ function App(){
                 boxShadow:eStop?'0 0 20px rgba(248,113,113,.5)':'none',
                 transition:'all .15s',
               }}>
-                {eStop?'◼ DETENIDO — CLICK PARA ARMAR':'⏻ PARADA DE EMERGENCIA'}
+                {eStop?'◼ STOPPED — CLICK TO ARM':'⏻ EMERGENCY STOP'}
               </button>
             </div>
 
-            {/* right: sensors & battery */}
+            {/* right: sensors & lifter */}
             <div style={{display:'flex',flexDirection:'column',gap:10}}>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-                <TeleValue label="Posición X" value={pose.x.toFixed(2)} unit="m" color="var(--accent)"/>
-                <TeleValue label="Posición Y" value={pose.y.toFixed(2)} unit="m" color="var(--accent)"/>
-                <TeleValue label="θ" value={(pose.theta*180/Math.PI).toFixed(1)} unit="°"/>
-                <TeleValue label="Uptime" value={fmtUp(uptime)}/>
+                <TeleValue label="Position X" value={pose.x.toFixed(2)} unit="m" color="var(--accent)"/>
+                <TeleValue label="Position Y" value={pose.y.toFixed(2)} unit="m" color="var(--accent)"/>
+                <TeleValue label="θ"          value={(pose.theta*180/Math.PI).toFixed(1)} unit="°"/>
+                <TeleValue label="Uptime"     value={fmtUp(uptime)}/>
               </div>
-
-              <div style={{
-                padding:'14px 16px',background:'var(--surface)',
-                border:'1px solid var(--border)',borderRadius:8,
-                display:'flex',flexDirection:'column',gap:8,
-              }}>
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline'}}>
-                  <span style={{fontFamily:'var(--mono)',fontSize:9.5,letterSpacing:'.14em',
-                    textTransform:'uppercase',color:'var(--mute)'}}>BATERÍA · 11.1V LiPo</span>
-                  <span style={{fontFamily:'var(--mono)',fontSize:16,fontWeight:600,
-                    color:battery<30?'var(--danger)':battery<50?'var(--accent2)':'var(--accent)',
-                    fontVariantNumeric:'tabular-nums'}}>{battery.toFixed(0)}%</span>
-                </div>
-                <div style={{height:8,background:'rgba(255,255,255,.06)',borderRadius:4,overflow:'hidden'}}>
-                  <div style={{
-                    height:'100%',transition:'width .5s',width:`${battery}%`,borderRadius:4,
-                    background:battery<30?'var(--danger)':battery<50?'var(--accent2)':'var(--accent)',
-                  }}/>
-                </div>
-                <div style={{display:'flex',justifyContent:'space-between',
-                  fontFamily:'var(--mono)',fontSize:10,color:'var(--dim)'}}>
-                  <span>{(11.1+(battery-50)/50*.6).toFixed(2)} V</span>
-                  <span>{(.4+Math.abs(vel.lin)*.8).toFixed(2)} A</span>
-                  <span>~{Math.floor(battery*1.4)} min</span>
-                </div>
-              </div>
-
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-                <TeleValue label="CPU" value={cpuBuf[cpuBuf.length-1]?.toFixed(0)||'0'} unit="%" spark={cpuBuf} color="#7aa9ff"/>
-                <TeleValue label="Vel. Lineal" value={vel.lin.toFixed(2)} unit="m/s" spark={linBuf} color="var(--accent)"/>
+                <TeleValue label="CPU"      value={cpuBuf[cpuBuf.length-1]?.toFixed(0)||'0'} unit="%" spark={cpuBuf} color="#7aa9ff"/>
+                <TeleValue label="Lin. Vel" value={vel.lin.toFixed(2)} unit="m/s" spark={linBuf} color="var(--accent)"/>
+              </div>
+
+              {/* lifter controls */}
+              <div style={{
+                background:'var(--surface)',border:'1px solid var(--border)',
+                borderRadius:8,padding:12,display:'flex',flexDirection:'column',gap:8,
+              }}>
+                <div style={{fontFamily:'var(--mono)',fontSize:9,letterSpacing:'.14em',
+                  textTransform:'uppercase',color:'var(--mute)'}}>Lifter</div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:6}}>
+                  <button onClick={()=>{fetch('/api/lifter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'raise'})}).catch(()=>{});}}
+                    style={{padding:'8px',borderRadius:6,cursor:'pointer',fontSize:9,fontWeight:600,letterSpacing:'.1em',
+                      border:'1px solid rgba(52,211,153,.4)',background:'transparent',color:'var(--accent)',
+                      transition:'all .15s',
+                    }}>
+                    ↑ RAISE
+                  </button>
+                  <button onClick={()=>{fetch('/api/lifter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'stop'})}).catch(()=>{});}}
+                    style={{padding:'8px',borderRadius:6,cursor:'pointer',fontSize:9,fontWeight:600,letterSpacing:'.1em',
+                      border:'1px solid rgba(251,191,36,.4)',background:'transparent',color:'var(--accent2)',
+                      transition:'all .15s',
+                    }}>
+                    ⏸ STOP
+                  </button>
+                  <button onClick={()=>{fetch('/api/lifter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'lower'})}).catch(()=>{});}}
+                    style={{padding:'8px',borderRadius:6,cursor:'pointer',fontSize:9,fontWeight:600,letterSpacing:'.1em',
+                      border:'1px solid rgba(248,113,113,.4)',background:'transparent',color:'var(--danger)',
+                      transition:'all .15s',
+                    }}>
+                    ↓ LOWER
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -653,11 +879,15 @@ function App(){
         fontFamily:'var(--mono)',fontSize:10,color:'var(--mute)',letterSpacing:'.06em',
       }}>
         <span>ROS2 HUMBLE</span>
-        <span>/cmd_vel {vel.lin.toFixed(2)} m/s · {vel.ang.toFixed(2)} rad/s</span>
-        <span>BATT {battery.toFixed(0)}%</span>
+        <span style={{color:teleOpEnabled?'var(--text)':'rgba(255,255,255,.3)'}}>
+          /cmd_vel {teleOpEnabled?`${vel.lin.toFixed(2)} m/s · ${vel.ang.toFixed(2)} rad/s`:'DISABLED'}
+        </span>
         <span style={{flex:1}}/>
+        <span style={{color:teleOpEnabled?'var(--accent2)':'rgba(255,255,255,.3)'}}>
+          {teleOpEnabled?'◆ TELEOP':'○ IDLE'}
+        </span>
         <span style={{color:eStop?'var(--danger)':'var(--accent)'}}>
-          ● {eStop?'DETENIDO':'ACTIVO'}
+          ● {eStop?'STOPPED':'ARMED'}
         </span>
         <span>UPTIME {fmtUp(uptime)}</span>
       </footer>
