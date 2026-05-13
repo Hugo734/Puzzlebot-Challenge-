@@ -3,19 +3,17 @@
 <package format="3">
   <name>navigation</name>
   <version>0.1.0</version>
-  <description>A* + Bug1 + PID path follower for AMR warehouse robot</description>
-  <maintainer email="jordanpalafoxs@gmail.com">Jordan</maintainer>
+  <description>A* + Bug1 + PID navigation for the Puzzlebot AMR</description>
+  <maintainer email="jordanpalafoxs@gmail.com">jordan</maintainer>
   <license>MIT</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
-
   <depend>rclpy</depend>
-  <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>tf2_ros</depend>
-  <depend>python3-numpy</depend>
+  <depend>visualization_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

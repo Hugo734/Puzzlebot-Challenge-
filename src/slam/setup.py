@@ -28,7 +28,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'slam_node = slam.slam_node:main',
+            'slam_node  = slam.slam_node:main',
+            'map_saver  = slam.map_saver_node:main',
         ],
     },
 )
