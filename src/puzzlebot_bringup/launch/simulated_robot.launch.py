@@ -20,7 +20,7 @@ def generate_launch_description():
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             os.path.join(get_package_share_directory("puzzlebot_description"), "launch"),
-            "/gazebo2.launch.py"
+            "/gazebo.launch.py"
         ]),
         launch_arguments={
             "world_name": LaunchConfiguration("world_name"),

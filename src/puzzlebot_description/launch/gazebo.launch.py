@@ -17,7 +17,7 @@ def generate_launch_description():
 
     model_arg = DeclareLaunchArgument(
         name="model",
-        default_value=os.path.join(puzzlebot_description, "urdf", "puzzlebot.urdf.xacro"),
+        default_value=os.path.join(puzzlebot_description, "urdf", "puzzlebot_with_lifter.urdf.xacro"),
         description="Absolute path to robot urdf file"
     )
 
@@ -43,6 +43,10 @@ def generate_launch_description():
     ign_resource_path = SetEnvironmentVariable(
         "IGN_GAZEBO_RESOURCE_PATH",
         model_path
+    )
+    gl_always_software = SetEnvironmentVariable(
+        "LIBGL_ALWAYS_SOFTWARE",
+        "1"
     )
 
     ros_distro = os.environ["ROS_DISTRO"]
@@ -102,6 +106,7 @@ def generate_launch_description():
         world_name_arg,
         gz_resource_path,
         ign_resource_path,
+        gl_always_software,
         robot_state_publisher_node,
         gazebo,
         gz_spawn_entity,
