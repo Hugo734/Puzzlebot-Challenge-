@@ -56,6 +56,7 @@ class DashboardNode(Node):
                 debug=debug,
                 use_reloader=False,  # reloader is incompatible with threads
                 log_output=debug,
+                allow_unsafe_werkzeug=True,
             )
         except Exception as exc:  # noqa: BLE001
             self.get_logger().error(f"Flask server error: {exc}")

@@ -456,3 +456,169 @@ body {
   .panel-left, .panel-right { overflow: visible; }
   .feed-img { max-height: 220px; }
 }
+
+/* ===================================================================
+   TAB BAR
+   =================================================================== */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+.tab-btn {
+  padding: 6px 14px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--dim);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.tab-btn:hover { color: var(--text); border-color: var(--border); }
+.tab-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(0,255,136,0.07);
+}
+.tab-pane.hidden { display: none; }
+
+/* ===================================================================
+   TELEOP KEY GRID
+   =================================================================== */
+.teleop-keys {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin: 12px 0;
+}
+.key-row { display: flex; gap: 4px; }
+.key {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--dim);
+  transition: all 0.08s;
+  user-select: none;
+}
+.key.pressed {
+  background: rgba(0,255,136,0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 8px rgba(0,255,136,0.3);
+}
+.key-spacer { width: 44px; height: 44px; }
+
+/* ===================================================================
+   E-STOP BUTTON
+   =================================================================== */
+.btn-estop {
+  width: 100%;
+  margin-top: 12px;
+  padding: 12px;
+  background: rgba(255,77,109,0.15);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  color: var(--danger);
+  font-weight: 700;
+  font-size: 0.95rem;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-estop:hover { background: rgba(255,77,109,0.25); box-shadow: 0 0 12px rgba(255,77,109,0.3); }
+.btn-estop:active { transform: scale(0.97); }
+
+/* ===================================================================
+   NAVIGATION SECTION
+   =================================================================== */
+.nav-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.btn-cancel {
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--dim);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-cancel:hover { border-color: var(--danger); color: var(--danger); }
+.nav-status-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+.nav-status-badge {
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-family: var(--mono);
+  background: var(--surface);
+  color: var(--dim);
+  border: 1px solid var(--border);
+}
+.nav-status-badge.FOLLOWING    { color: var(--info);   border-color: var(--info);   background: rgba(0,200,255,0.1); }
+.nav-status-badge.ALIGNING     { color: var(--warn);   border-color: var(--warn);   background: rgba(255,209,102,0.1); }
+.nav-status-badge.ARRIVED      { color: var(--accent); border-color: var(--accent); background: rgba(0,255,136,0.1); }
+.nav-status-badge.OBSTACLE     { color: var(--warn);   border-color: var(--warn);   background: rgba(255,150,0,0.1); }
+.nav-status-badge.WALL_FOLLOW  { color: #ff9944;       border-color: #ff6600;       background: rgba(255,100,0,0.1); }
+.nav-status-badge.ERROR        { color: var(--danger); border-color: var(--danger); background: rgba(255,77,109,0.1); }
+
+/* ===================================================================
+   TELEOP VELOCITY HINT
+   =================================================================== */
+.teleop-hint {
+  text-align: center;
+  color: var(--dim);
+  font-size: 0.72rem;
+  margin-top: 8px;
+}
+
+/* ===================================================================
+   BIPOLAR VELOCITY BAR
+   =================================================================== */
+.bipolar-wrap { position: relative; }
+.bipolar-center {
+  position: absolute;
+  left: 50%; top: 0;
+  width: 1px; height: 100%;
+  background: var(--border);
+  z-index: 1;
+}
+.bipolar-wrap .vel-bar {
+  position: absolute;
+  top: 0; height: 100%;
+}
+
+/* ===================================================================
+   STATE BADGE — nav_status colon format (e.g. FOLLOWING:truck_1)
+   =================================================================== */
+.state-badge[class*="FOLLOWING"]    { background: #0a2a4a; color: var(--info);   border-color: var(--info);   box-shadow: 0 0 8px rgba(0,200,255,0.2); }
+.state-badge[class*="ARRIVED"]      { background: #0a3a1a; color: var(--accent); border-color: var(--accent); box-shadow: 0 0 8px rgba(0,255,136,0.2); }
+.state-badge[class*="ALIGNING"]     { background: #3a2a00; color: var(--warn);   border-color: var(--warn); }
+.state-badge[class*="OBSTACLE"]     { background: #3a1a00; color: #ff9944;       border-color: #ff6600; }
+.state-badge[class*="WALL_FOLLOWING"] { background: #2a1a00; color: #ff9944;     border-color: #ff6600; }
+.state-badge[class*="ERROR"]        { background: #3a0010; color: var(--danger); border-color: var(--danger); }

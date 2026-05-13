@@ -7,6 +7,7 @@ Flask reads data via thread-safe locks.
 
 import io
 import json
+import os
 import struct
 import threading
 import zlib
@@ -24,6 +25,8 @@ class RobotState:
     mission: Optional[dict] = None
     velocity: dict = field(default_factory=lambda: {"linear": 0.0, "angular": 0.0})
     lifter_level: int = 0
+    scan: Optional[dict] = None
+    nav_plan: Optional[list] = None
 
 
 class RosBridge:
@@ -40,6 +43,7 @@ class RosBridge:
         self._state = RobotState()
         self._latest_frame: Optional[bytes] = None  # JPEG bytes
         self._latest_map: Optional[bytes] = None    # PNG bytes
+        self._waypoints: dict = {}
 
         best_effort_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -54,15 +58,15 @@ class RosBridge:
 
         # Lazy imports — ROS2 message types only available at runtime
         from geometry_msgs.msg import PoseStamped, Twist
-        from nav_msgs.msg import OccupancyGrid
-        from sensor_msgs.msg import Image
+        from nav_msgs.msg import OccupancyGrid, Path
+        from sensor_msgs.msg import Image, LaserScan
         from std_msgs.msg import String, UInt8
 
         self._node.create_subscription(
-            PoseStamped, "/robot_pose", self._cb_pose, best_effort_qos
+            PoseStamped, "/slam_pose", self._cb_pose, best_effort_qos
         )
         self._node.create_subscription(
-            String, "/robot_state", self._cb_state, reliable_qos
+            String, "/nav_status", self._cb_state, reliable_qos
         )
         self._node.create_subscription(
             String, "/mission", self._cb_mission, reliable_qos
@@ -79,8 +83,47 @@ class RosBridge:
         self._node.create_subscription(
             OccupancyGrid, "/map", self._cb_map, best_effort_qos
         )
+        self._node.create_subscription(
+            LaserScan, "/scan", self._cb_scan, best_effort_qos
+        )
+        self._node.create_subscription(
+            Path, "/plan", self._cb_plan, reliable_qos
+        )
 
         self._mission_pub = self._node.create_publisher(String, "/mission", reliable_qos)
+        self._goal_pub = self._node.create_publisher(String, "/goal_waypoint", reliable_qos)
+        self._cmd_vel_pub = self._node.create_publisher(Twist, "/cmd_vel", reliable_qos)
+
+        # Load waypoints from file at startup
+        self._load_waypoints()
+
+    # ------------------------------------------------------------------
+    # Waypoints loading
+    # ------------------------------------------------------------------
+
+    def _load_waypoints(self) -> None:
+        """Load waypoints.yaml from ~/ros2_maps/ at startup."""
+        import yaml
+
+        waypoints_path = os.path.expanduser("~/ros2_maps/waypoints.yaml")
+        try:
+            with open(waypoints_path, "r") as f:
+                data = yaml.safe_load(f)
+            if isinstance(data, dict):
+                self._waypoints = data.get("waypoints", data)
+                self._node.get_logger().info(
+                    f"Loaded {len(self._waypoints)} waypoints from {waypoints_path}"
+                )
+            else:
+                self._node.get_logger().warning(
+                    f"Unexpected waypoints format in {waypoints_path}"
+                )
+        except FileNotFoundError:
+            self._node.get_logger().warning(
+                f"Waypoints file not found: {waypoints_path} — using empty waypoints"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._node.get_logger().warning(f"Could not load waypoints: {exc}")
 
     # ------------------------------------------------------------------
     # Public API (called from Flask threads)
@@ -104,6 +147,25 @@ class RosBridge:
         msg = String()
         msg.data = mission_json
         self._mission_pub.publish(msg)
+
+    def publish_goal(self, name: str) -> None:
+        """Publish a goal waypoint name to /goal_waypoint."""
+        from std_msgs.msg import String
+        msg = String()
+        msg.data = name
+        self._goal_pub.publish(msg)
+
+    def publish_cmd_vel(self, linear: float, angular: float) -> None:
+        """Publish a Twist command to /cmd_vel."""
+        from geometry_msgs.msg import Twist
+        msg = Twist()
+        msg.linear.x = float(linear)
+        msg.angular.z = float(angular)
+        self._cmd_vel_pub.publish(msg)
+
+    def get_waypoints(self) -> dict:
+        """Return the waypoints dict {name: {x, y, theta}}."""
+        return dict(self._waypoints)
 
     # ------------------------------------------------------------------
     # ROS2 callbacks (executor thread)
@@ -163,6 +225,28 @@ class RosBridge:
             return
         with self._lock:
             self._latest_map = png
+
+    def _cb_scan(self, msg) -> None:
+        """Downsample every 4th ray and store scan data."""
+        ranges_raw = list(msg.ranges)
+        # Downsample: keep every 4th ray
+        ranges_ds = ranges_raw[::4]
+        with self._lock:
+            self._state.scan = {
+                "ranges": ranges_ds,
+                "angle_min": msg.angle_min,
+                "angle_increment": msg.angle_increment * 4,
+                "range_max": msg.range_max,
+            }
+
+    def _cb_plan(self, msg) -> None:
+        """Store nav plan as list of {x, y} dicts."""
+        points = [
+            {"x": round(pose.pose.position.x, 3), "y": round(pose.pose.position.y, 3)}
+            for pose in msg.poses
+        ]
+        with self._lock:
+            self._state.nav_plan = points
 
     # ------------------------------------------------------------------
     # Conversion helpers

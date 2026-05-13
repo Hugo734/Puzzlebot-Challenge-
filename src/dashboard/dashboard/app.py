@@ -46,6 +46,37 @@ VALID_LOCATIONS = {
 VALID_LEVELS = {1, 2, 3}
 
 # ---------------------------------------------------------------------------
+# Teleop watchdog state
+# ---------------------------------------------------------------------------
+
+_last_teleop_time: float = 0.0
+_teleop_active: bool = False
+_teleop_lock = threading.Lock()
+
+
+def _teleop_watchdog() -> None:
+    """Stop the robot if no teleop command received for 400ms."""
+    global _teleop_active
+    while True:
+        time.sleep(0.05)
+        with _teleop_lock:
+            active = _teleop_active
+            last = _last_teleop_time
+        if active and ros_bridge is not None:
+            if time.monotonic() - last > 0.35:
+                try:
+                    ros_bridge.publish_cmd_vel(0.0, 0.0)
+                except Exception:  # noqa: BLE001
+                    pass
+                with _teleop_lock:
+                    _teleop_active = False
+
+
+# Start watchdog thread eagerly (daemon, won't block shutdown)
+_watchdog_thread = threading.Thread(target=_teleop_watchdog, daemon=True)
+_watchdog_thread.start()
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -149,6 +180,74 @@ def video_feed():
     )
 
 
+@app.route("/api/waypoints")
+def get_waypoints():
+    """Return list of waypoint names."""
+    if ros_bridge is None:
+        return jsonify({"waypoints": []})
+    wps = ros_bridge.get_waypoints()
+    return jsonify({"waypoints": sorted(wps.keys())})
+
+
+@app.route("/api/goal", methods=["POST"])
+def send_goal():
+    """
+    Send a navigation goal waypoint.
+
+    Body: {"waypoint": "truck_1"} or {"waypoint": ""} to cancel.
+    """
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+
+    body = request.get_json(silent=True) or {}
+    waypoint = body.get("waypoint", "")
+
+    ros_bridge.publish_goal(waypoint)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/teleop", methods=["POST"])
+def send_teleop():
+    """
+    Send a teleop velocity command.
+
+    Body: {"linear": 0.15, "angular": 0.0}
+    """
+    global _last_teleop_time, _teleop_active
+
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+
+    body = request.get_json(silent=True) or {}
+    try:
+        linear = float(body.get("linear", 0.0))
+        angular = float(body.get("angular", 0.0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "linear and angular must be numbers"}), 400
+
+    ros_bridge.publish_cmd_vel(linear, angular)
+
+    with _teleop_lock:
+        _last_teleop_time = time.monotonic()
+        _teleop_active = True
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/teleop/stop", methods=["POST"])
+def stop_teleop():
+    """Immediately stop the robot."""
+    global _teleop_active
+
+    if ros_bridge is not None:
+        ros_bridge.publish_cmd_vel(0.0, 0.0)
+
+    with _teleop_lock:
+        _teleop_active = False
+
+    return jsonify({"ok": True})
+
+
 # ---------------------------------------------------------------------------
 # MJPEG generator
 # ---------------------------------------------------------------------------
@@ -229,13 +328,18 @@ def _background_socketio_emitter() -> None:
     - robot_pose   → 5 Hz
     - robot_state  → on change (polled at 5 Hz)
     - telemetry    → 1 Hz
+    - scan_data    → 5 Hz (every other 200ms tick)
+    - nav_plan     → on change
     """
     last_state_str = ""
     last_telemetry_time = 0.0
+    last_nav_plan_str = ""
+    tick = 0
     interval = 0.2  # 5 Hz base tick
 
     while True:
         time.sleep(interval)
+        tick += 1
 
         if ros_bridge is None:
             continue
@@ -262,6 +366,20 @@ def _background_socketio_emitter() -> None:
             socketio.emit(
                 "robot_state",
                 {"state": state.state, "mission": state.mission},
+            )
+
+        # 5 Hz (every other tick ~2.5 Hz effectively, but emit every tick for simplicity)
+        # Emit scan_data at 5 Hz when available
+        if tick % 2 == 0 and state.scan is not None:
+            socketio.emit("scan_data", state.scan)
+
+        # Nav plan — on change
+        nav_plan_str = json.dumps(state.nav_plan, sort_keys=True)
+        if nav_plan_str != last_nav_plan_str:
+            last_nav_plan_str = nav_plan_str
+            socketio.emit(
+                "nav_plan",
+                {"points": state.nav_plan or []},
             )
 
         # 1 Hz — telemetry
