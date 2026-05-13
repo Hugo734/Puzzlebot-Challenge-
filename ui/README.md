@@ -1,10 +1,10 @@
 # Puzzlebot Control UI
 
-Interfaz web para teleoperación y monitoreo de un robot Puzzlebot usando ROS 2 Humble.
+Web interface for teleoperating and monitoring a Puzzlebot robot using ROS 2 Humble.
 
 ---
 
-## Arquitectura
+## Architecture
 
 ```
 ROS 2 (robot)
@@ -17,31 +17,31 @@ ros2-grpc-wrapper.py   ← Terminal 1
 app.py  (Flask)        ← Terminal 2
     │  :8002
     ▼
-Navegador  →  http://localhost:8002
+Browser  →  http://localhost:8002
 ```
 
-| Componente | Archivo | Puerto |
+| Component | File | Port |
 |---|---|---|
 | ROS 2 wrapper | `PY-RPC-Wrapper-Server-Linux/ros2-grpc-wrapper.py` | HTTP 7043 · gRPC 7042 |
-| Servidor web Flask | `FLASK-REST-Call-Linux/app.py` | 8002 |
-| UI React | `FLASK-REST-Call-Linux/templates/result.html` | — |
+| Flask web server | `FLASK-REST-Call-Linux/app.py` | 8002 |
+| React UI | `FLASK-REST-Call-Linux/templates/result.html` | — |
 
 ---
 
-## Requisitos previos
+## Prerequisites
 
-- ROS 2 Humble instalado y con `source /opt/ros/humble/setup.bash`
+- ROS 2 Humble installed with `source /opt/ros/humble/setup.bash`
 - Python 3.10+
-- Paquetes Python: `flask`, `requests`, `grpcio`, `grpcio-tools`, `opencv-python`, `cv_bridge`, `rclpy`
+- Python packages: `flask`, `requests`, `grpcio`, `grpcio-tools`, `opencv-python`, `cv_bridge`, `rclpy`
 
 ---
 
-## Cómo lanzar
+## How to Launch
 
-### Terminal 1 — ROS 2 Wrapper (debe correr en el entorno ROS 2)
+### Terminal 1 — ROS 2 Wrapper (must run in ROS 2 environment)
 
-> **Importante:** si tienes Miniconda/Anaconda activo, desactívalo primero.
-> ROS 2 Humble requiere Python 3.10 del sistema; conda usa Python 3.12 y rompe `rclpy`.
+> **Important:** if Miniconda/Anaconda is active, deactivate it first.
+> ROS 2 Humble requires Python 3.10 from the system; conda uses Python 3.12 and breaks `rclpy`.
 
 ```bash
 conda deactivate
@@ -50,27 +50,27 @@ cd /home/rosendorios/Desktop/Modulo3/UI/PY-RPC-Wrapper-Server-Linux
 python3 ros2-grpc-wrapper.py
 ```
 
-Este proceso:
-- Crea un nodo ROS 2 `object_position_wrapper`
-- Se suscribe a `/odom` y `/image_result`
-- Publica en `/cmd_vel` a 20 Hz
-- Expone un servidor HTTP en el puerto **7043** y un servidor gRPC en el puerto **7042**
+This process:
+- Creates a ROS 2 node `object_position_wrapper`
+- Subscribes to `/odom` and `/image_result`
+- Publishes to `/cmd_vel` at 20 Hz
+- Exposes an HTTP server on port **7043** and a gRPC server on port **7042**
 
-### Terminal 2 — Servidor Flask (UI web)
+### Terminal 2 — Flask Server (web UI)
 
 ```bash
 cd /home/rosendorios/Desktop/Modulo3/UI/FLASK-REST-Call-Linux
 python3 app.py
 ```
 
-Este proceso:
-- Sirve la interfaz web en `http://localhost:8002`
-- Hace de proxy entre el navegador y el wrapper:
-  - `GET /api/odom` → obtiene posición del robot
-  - `POST /api/cmd_vel` → envía comandos de velocidad
-  - `GET /api/camera` → stream MJPEG de la cámara
+This process:
+- Serves the web interface at `http://localhost:8002`
+- Acts as a proxy between the browser and the wrapper:
+  - `GET /api/odom` → retrieves robot position
+  - `POST /api/cmd_vel` → sends velocity commands
+  - `GET /api/camera` → MJPEG stream from camera
 
-### Abrir la UI
+### Open the UI
 
 ```
 http://localhost:8002
@@ -78,40 +78,40 @@ http://localhost:8002
 
 ---
 
-## Pestañas de la interfaz
+## Interface Tabs
 
-| Pestaña | Descripción |
+| Tab | Description |
 |---|---|
-| **MAPA** | Vista de planta con LIDAR sintético, pose real del robot y waypoints. Haz clic en el mapa para añadir waypoints. |
-| **CÁMARA** | Stream en vivo MJPEG desde `/image_result`. Muestra "Sin señal" si el wrapper no está corriendo. |
-| **TELEOP** | Control por teclado, barras de velocidad, batería y E-Stop. |
+| **MAP** | Top-down view with synthetic LIDAR, actual robot pose, and waypoints. Click on the map to add waypoints. |
+| **CAMERA** | Live MJPEG stream from `/image_result`. Shows "No signal" if wrapper is not running. |
+| **TELEOP** | Keyboard control, velocity bars, battery, and E-Stop. |
 
 ---
 
-## Controles de teclado (pestaña TELEOP)
+## Keyboard Controls (TELEOP tab)
 
-| Tecla | Acción |
+| Key | Action |
 |---|---|
-| `W` / `↑` | Avanzar |
-| `S` / `↓` | Retroceder |
-| `A` / `←` | Girar izquierda |
-| `D` / `→` | Girar derecha |
+| `W` / `↑` | Move forward |
+| `S` / `↓` | Move backward |
+| `A` / `←` | Turn left |
+| `D` / `→` | Turn right |
 | `Shift` | Boost (×1.6) |
-| `Espacio` | E-Stop (alterna armado/detenido) |
+| `Space` | E-Stop (toggles armed/stopped) |
 
 ---
 
-## Topics ROS 2 utilizados
+## ROS 2 Topics Used
 
-| Topic | Tipo | Dirección |
+| Topic | Type | Direction |
 |---|---|---|
-| `/odom` | `nav_msgs/Odometry` | Suscripción |
-| `/image_result` | `sensor_msgs/Image` | Suscripción |
-| `/cmd_vel` | `geometry_msgs/Twist` | Publicación |
+| `/odom` | `nav_msgs/Odometry` | Subscribe |
+| `/image_result` | `sensor_msgs/Image` | Subscribe |
+| `/cmd_vel` | `geometry_msgs/Twist` | Publish |
 
 ---
 
-## Regenerar los protobuf (solo si se modifica el `.proto`)
+## Regenerate Protobuf (only if modifying `.proto`)
 
 ```bash
 cd /home/rosendorios/Desktop/Modulo3/UI/PY-RPC-Wrapper-Server-Linux
