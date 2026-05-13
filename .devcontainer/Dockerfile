@@ -25,8 +25,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-tf-transformations \
     ros-humble-nav-msgs \
     ros-humble-sensor-msgs \
+    ros-humble-topic-tools \
     xterm \
     && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install flask-socketio
 
 WORKDIR /puzzlebot_ws
 
