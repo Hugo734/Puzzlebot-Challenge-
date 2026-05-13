@@ -143,12 +143,12 @@
 
       <!-- Tab Bar -->
       <div class="tab-bar">
-        <button class="tab-btn active" data-tab="mission">MISIÓN</button>
-        <button class="tab-btn" data-tab="navigate">NAVEGAR</button>
+        <button class="tab-btn active" data-tab="mission">MISSION</button>
+        <button class="tab-btn" data-tab="navigate">NAVIGATE</button>
         <button class="tab-btn" data-tab="teleop">TELEOP</button>
       </div>
 
-      <!-- ---- TAB: MISIÓN ---- -->
+      <!-- ---- TAB: MISSION ---- -->
       <div class="tab-pane" id="tab-mission">
 
         <section class="card">
@@ -242,7 +242,7 @@
 
       </div><!-- /tab-mission -->
 
-      <!-- ---- TAB: NAVEGAR ---- -->
+      <!-- ---- TAB: NAVIGATE ---- -->
       <div class="tab-pane hidden" id="tab-navigate">
 
         <section class="card">
@@ -254,15 +254,15 @@
               <option value="">— loading waypoints… —</option>
             </select>
             <button class="btn-submit" id="btnGoWaypoint" type="button">
-              &#9654; Ir
+              &#9654; Go
             </button>
             <button class="btn-cancel" id="btnCancelNav" type="button">
-              &#9632; Cancelar
+              &#9632; Cancel
             </button>
           </div>
 
           <div class="nav-status-box">
-            <span class="tele-label">Estado:</span>
+            <span class="tele-label">Status:</span>
             <span class="nav-status-badge" id="navStatusBadge">UNKNOWN</span>
           </div>
         </section>
@@ -314,7 +314,7 @@
             &#9632; E-STOP
           </button>
 
-          <p class="teleop-hint">WASD / Flechas &nbsp;&middot;&nbsp; Espacio = E-Stop</p>
+          <p class="teleop-hint">WASD / Arrow Keys &nbsp;&middot;&nbsp; Space = E-Stop</p>
         </section>
 
       </div><!-- /tab-teleop -->

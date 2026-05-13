@@ -7,7 +7,7 @@
  *  - Update all UI elements reactively
  *  - Submit mission form via fetch POST /api/mission
  *  - Track session stats (missions sent, uptime, WS events)
- *  - Tab switching (MISIÓN / NAVEGAR / TELEOP)
+ *  - Tab switching (MISSION / NAVIGATE / TELEOP)
  *  - Waypoint navigation control
  *  - WASD teleop with watchdog
  *  - Canvas map overlay (robot arrow + scan dots + path)
@@ -302,7 +302,7 @@ function initNavControls() {
       const select = document.getElementById('waypointSelect');
       const waypoint = select ? select.value : '';
       if (!waypoint) {
-        showToast('Selecciona un waypoint primero.', 'error');
+        showToast('Select a waypoint first.', 'error');
         return;
       }
       try {
@@ -313,12 +313,12 @@ function initNavControls() {
         });
         const json = await res.json();
         if (json.ok) {
-          showToast(`Navegando a: ${waypoint}`, 'success');
+          showToast(`Navigating to: ${waypoint}`, 'success');
         } else {
           showToast(`Error: ${json.error || 'unknown'}`, 'error');
         }
       } catch (err) {
-        showToast(`Error de red: ${err.message}`, 'error');
+        showToast(`Network error: ${err.message}`, 'error');
       }
     });
   }
@@ -331,9 +331,9 @@ function initNavControls() {
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({waypoint: ''}),
         });
-        showToast('Navegación cancelada', 'success');
+        showToast('Navigation cancelled', 'success');
       } catch (err) {
-        showToast(`Error de red: ${err.message}`, 'error');
+        showToast(`Network error: ${err.message}`, 'error');
       }
     });
   }
