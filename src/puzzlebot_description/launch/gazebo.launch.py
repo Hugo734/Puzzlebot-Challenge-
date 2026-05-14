@@ -17,7 +17,8 @@ def generate_launch_description():
 
     model_arg = DeclareLaunchArgument(
         name="model",
-        default_value=os.path.join(puzzlebot_description, "urdf", "puzzlebot_with_lifter.urdf.xacro"),
+        # default_value=os.path.join(puzzlebot_description, "urdf", "puzzlebot_with_lifter.urdf.xacro"),
+        default_value=os.path.join(puzzlebot_description, "urdf", "puzzlebot_mcr2.urdf.xacro"),
         description="Absolute path to robot urdf file"
     )
 
@@ -94,7 +95,9 @@ def generate_launch_description():
         arguments=[
             "/clock@rosgraph_msgs/msg/Clock[ignition.msgs.Clock",
             "/imu@sensor_msgs/msg/Imu[ignition.msgs.IMU",
-            "/scan@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan"
+            "/scan@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan",
+            "/mast_camera/image_raw@sensor_msgs/msg/Image[ignition.msgs.Image",
+            "/mast_camera/camera_info@sensor_msgs/msg/CameraInfo[ignition.msgs.CameraInfo",
         ],
         remappings=[
             ('/imu', '/imu/out'),
