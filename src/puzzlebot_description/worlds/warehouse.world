@@ -163,19 +163,19 @@
     <include>
       <uri>model://warehouse_rack</uri>
       <name>rack_B1</name>
-      <pose>-1.44 -1.05 0 0 0 0</pose>
+      <pose>-1.44 -1.05 0 0 0 3.14159</pose>
     </include>
 
     <include>
       <uri>model://warehouse_rack</uri>
       <name>rack_B2</name>
-      <pose>-1.44 0 0 0 0 0</pose>
+      <pose>-1.44 0 0 0 0 3.14159</pose>
     </include>
 
     <include>
       <uri>model://warehouse_rack</uri>
       <name>rack_B3</name>
-      <pose>-1.44 1.05 0 0 0 0</pose>
+      <pose>-1.44 1.05 0 0 0 3.14159</pose>
     </include>
 
     <!-- ===== Rack group 2 — right (positive X) ===== -->
@@ -184,19 +184,19 @@
     <include>
       <uri>model://warehouse_rack</uri>
       <name>rack_C1</name>
-      <pose>1.44 -1.05 0 0 0 0</pose>
+      <pose>1.44 -1.05 0 0 0 3.14159</pose>
     </include>
 
     <include>
       <uri>model://warehouse_rack</uri>
       <name>rack_C2</name>
-      <pose>1.44 0 0 0 0 0</pose>
+      <pose>1.44 0 0 0 0 3.14159</pose>
     </include>
 
     <include>
       <uri>model://warehouse_rack</uri>
       <name>rack_C3</name>
-      <pose>1.44 1.05 0 0 0 0</pose>
+      <pose>1.44 1.05 0 0 0 3.14159</pose>
     </include>
 
     <!-- Row D (outer, x = +1.8) -->
