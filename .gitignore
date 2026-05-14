@@ -8,3 +8,4 @@ docs/
 FULL_INSTRUCTIONS.md
 .claude/memory/
 *.pyc
+actions-runner/
