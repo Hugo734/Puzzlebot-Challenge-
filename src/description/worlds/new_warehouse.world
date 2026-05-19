@@ -138,7 +138,7 @@
       <pose>-1.800 -1.05 0 0 0 -1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
@@ -152,7 +152,7 @@
       <pose>-1.800 0.00 0 0 0 -1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
@@ -166,7 +166,7 @@
       <pose>-1.800 1.05 0 0 0 -1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
@@ -181,7 +181,7 @@
       <pose>-1.450 -1.05 0 0 0 1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
@@ -195,7 +195,7 @@
       <pose>-1.450 0.00 0 0 0 1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
@@ -209,7 +209,7 @@
       <pose>-1.450 1.05 0 0 0 1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
@@ -224,7 +224,7 @@
       <pose>1.450 -1.05 0 0 0 1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
@@ -238,7 +238,7 @@
       <pose>1.450 0.00 0 0 0 1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
@@ -252,7 +252,7 @@
       <pose>1.450 1.05 0 0 0 1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
@@ -267,7 +267,7 @@
       <pose>1.800 -1.05 0 0 0 -1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
@@ -281,7 +281,7 @@
       <pose>1.800 0.00 0 0 0 -1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
@@ -295,7 +295,7 @@
       <pose>1.800 1.05 0 0 0 -1.5708</pose>
       <link name="link">
         <visual name="visual">
-          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+          <geometry><mesh><uri>model://description/meshes/other/rack.dae</uri></mesh></geometry>
         </visual>
         <collision name="collision">
           <pose>0.175 0.055 0.1325 0 0 0</pose>
