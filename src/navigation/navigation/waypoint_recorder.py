@@ -15,17 +15,27 @@ Output:
 import math
 import os
 import queue
+import signal
 import threading
 
 import yaml
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped
 from nav_msgs.msg import OccupancyGrid
 from visualization_msgs.msg import Marker, MarkerArray
 from sensor_msgs.msg import PointCloud2, PointField
 from pathlib import Path
 import struct
+
+# Transient Local so late-joining subscribers (RViz) get the last message
+_LATCHED = QoSProfile(
+    depth=1,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=ReliabilityPolicy.RELIABLE,
+    history=HistoryPolicy.KEEP_LAST,
+)
 
 
 def _yaw_from_q(q):
@@ -109,9 +119,9 @@ class WaypointRecorder(Node):
         self._waypoints: dict = {}
         self._pending: queue.Queue = queue.Queue()
 
-        self._map_pub    = self.create_publisher(OccupancyGrid, '/map', 1)
-        self._cloud_pub  = self.create_publisher(PointCloud2, '/map_walls', 1)
-        self._marker_pub = self.create_publisher(MarkerArray, '/waypoint_markers', 1)
+        self._map_pub    = self.create_publisher(OccupancyGrid, '/map', _LATCHED)
+        self._cloud_pub  = self.create_publisher(PointCloud2, '/map_walls', _LATCHED)
+        self._marker_pub = self.create_publisher(MarkerArray, '/waypoint_markers', _LATCHED)
         self._cached_grid: OccupancyGrid | None = None
 
         # Accept from EITHER RViz tool:
@@ -122,6 +132,7 @@ class WaypointRecorder(Node):
         self.create_subscription(
             PoseStamped, '/goal_pose', self._goalpose_cb, 10)
 
+        self._load_existing_waypoints()
         self._load_map_cache()
         # Republish every 3 s so RViz gets it regardless of connection timing
         self.create_timer(3.0, self._republish_map)
@@ -131,8 +142,22 @@ class WaypointRecorder(Node):
             f'Waypoint recorder ready\n'
             f'  Map: {self.get_parameter("map_yaml").value}\n'
             f'  Output: {output}\n'
-            f'  In RViz: use the [2D Pose Estimate] button (arrow) to place waypoints'
+            f'  Loaded {len(self._waypoints)} existing waypoints\n'
+            f'  In RViz: use the [2D Goal Pose] or [2D Pose Estimate] button to place waypoints'
         )
+
+    def _load_existing_waypoints(self):
+        path = os.path.expanduser(self.get_parameter('output').value)
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path) as f:
+                doc = yaml.safe_load(f)
+            loaded = doc.get('waypoints', {}) or {}
+            self._waypoints.update(loaded)
+            self.get_logger().info(f'Loaded {len(loaded)} waypoints from {path}')
+        except Exception as exc:
+            self.get_logger().warn(f'Could not load existing waypoints: {exc}')
 
     def _load_map_cache(self):
         yaml_path = self.get_parameter('map_yaml').value
@@ -153,6 +178,8 @@ class WaypointRecorder(Node):
         self._cached_grid.header.stamp = now
         self._map_pub.publish(self._cached_grid)
         self._cloud_pub.publish(self._grid_to_cloud(self._cached_grid))
+        if self._waypoints:
+            self._publish_markers()
 
     def _grid_to_cloud(self, grid: OccupancyGrid) -> PointCloud2:
         """Publish occupied cells as PointCloud2 — avoids the indexed_8bit_image GLSL bug."""
@@ -281,6 +308,7 @@ class WaypointRecorder(Node):
                         'theta': round(theta, 4),
                     }
                     self._publish_markers()
+                    self.save()
                     print(f'  ✓ Saved "{label}" — arrow visible in RViz\n')
                 else:
                     print('  ✗ Discarded\n')
@@ -309,6 +337,15 @@ def main():
 
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin_thread.start()
+
+    # Save on SIGTERM / SIGHUP too (xterm sends these instead of SIGINT when
+    # the launch process shuts down or the window is closed).
+    def _handle_exit(signum, frame):
+        node.save()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _handle_exit)
+    signal.signal(signal.SIGHUP, _handle_exit)
 
     try:
         node.interactive_loop()

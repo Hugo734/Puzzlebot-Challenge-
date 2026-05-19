@@ -7,8 +7,8 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    pkg_slam = get_package_share_directory('slam')
-    rviz_cfg = os.path.join(pkg_slam, 'config', 'slam.rviz')
+    pkg_nav  = get_package_share_directory('navigation')
+    rviz_cfg = os.path.join(pkg_nav, 'config', 'waypoint_recorder.rviz')
 
     map_yaml_arg = DeclareLaunchArgument(
         'map_yaml',
@@ -21,17 +21,40 @@ def generate_launch_description():
         description='Where to write waypoints.yaml',
     )
 
+    # Static TF: map frame exists without needing a full robot stack running.
+    # Publishes identity map→odom so RViz fixed frame resolves cleanly.
+    static_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='map_odom_static_tf',
+        arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
+        output='screen',
+    )
+
+    waypoint_recorder = Node(
+        package='navigation',
+        executable='waypoint_recorder',
+        name='waypoint_recorder',
+        parameters=[{
+            'map_yaml': LaunchConfiguration('map_yaml'),
+            'output':   LaunchConfiguration('output'),
+        }],
+        output='screen',
+        prefix='xterm -e',
+    )
+
     rviz = Node(
         package='rviz2',
         executable='rviz2',
         name='rviz2',
         arguments=['-d', rviz_cfg],
         output='screen',
-        additional_env={'MESA_GL_VERSION_OVERRIDE': '3.3COMPAT'},
     )
 
     return LaunchDescription([
         map_yaml_arg,
         output_arg,
+        static_tf,
+        waypoint_recorder,
         rviz,
     ])
