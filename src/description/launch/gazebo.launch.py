@@ -19,7 +19,7 @@ def generate_launch_description():
 
     model_arg = DeclareLaunchArgument(
         name="model",
-        default_value=os.path.join(puzzlebot_description, "urdf", "puzzlebot_mcr2.urdf.xacro"),
+        default_value=os.path.join(puzzlebot_description, "urdf", "puzzlebot_with_lifter.urdf.xacro"),
         description="Absolute path to robot urdf file"
     )
 

@@ -28,7 +28,7 @@ def generate_launch_description():
 
     slam_params = os.path.join(pkg_slam, 'config', 'slam_params.yaml')
     rviz_cfg    = os.path.join(pkg_slam, 'config', 'slam.rviz')
-    urdf_path   = os.path.join(pkg_description, 'urdf', 'puzzlebot_mcr2.urdf.xacro')
+    urdf_path   = os.path.join(pkg_description, 'urdf', 'puzzlebot_with_lifter.urdf.xacro')
 
     map_path_arg = DeclareLaunchArgument(
         'map_path',

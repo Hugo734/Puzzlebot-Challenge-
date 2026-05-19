@@ -17,6 +17,25 @@
       </xacro:unless>
     </xacro:if>
 
+    <!-- Lifter prismatic joints -->
+    <joint name="mast_inner_joint">
+      <command_interface name="effort">
+        <param name="min">-100.0</param>
+        <param name="max">100.0</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <joint name="carriage_joint">
+      <command_interface name="effort">
+        <param name="min">-50.0</param>
+        <param name="max">50.0</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
     <!-- Wheel joints -->
     <joint name="wheel_left_joint">
       <command_interface name="velocity">
