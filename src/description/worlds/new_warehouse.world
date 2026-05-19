@@ -1,0 +1,308 @@
+<?xml version="1.0" ?>
+<!--
+  new_warehouse world — 5 m (X) × 6 m (Y) interior.
+
+  Rack mesh: rack.dae  (0.35 m wide × 0.11 m deep × 0.265 m tall, origin at min corner)
+  Layout: 4 rows × 3 racks = 12 racks total.
+    Group 1 (left)  — Row A: x=-1.800, Row B: x=-1.450  back-to-back
+    Group 2 (right) — Row C: x=+1.450, Row D: x=+1.800  back-to-back
+    Each row: y = -1.05 / 0.00 / +1.05
+
+  Robot spawns at origin (centre of central aisle).
+-->
+<sdf version="1.6">
+  <world name="new_warehouse">
+
+    <!-- Required Ignition Fortress system plugins -->
+    <plugin filename="ignition-gazebo-physics-system"
+            name="ignition::gazebo::systems::Physics"/>
+    <plugin filename="ignition-gazebo-user-commands-system"
+            name="ignition::gazebo::systems::UserCommands"/>
+    <plugin filename="ignition-gazebo-scene-broadcaster-system"
+            name="ignition::gazebo::systems::SceneBroadcaster"/>
+    <plugin filename="ignition-gazebo-sensors-system"
+            name="ignition::gazebo::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <physics name="1ms" type="ode">
+      <max_step_size>0.01</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <!-- Overhead directional light -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.3 0.1 -0.95</direction>
+    </light>
+
+    <!-- Ground plane -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>100 100</size></plane>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>100 100</size></plane>
+          </geometry>
+          <material>
+            <ambient>0.45 0.45 0.45 1</ambient>
+            <diffuse>0.45 0.45 0.45 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ===== Walls  5 m (X) × 6 m (Y) interior, 0.1 m thick, 1.5 m tall ===== -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 3.05 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>5.2 0.1 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>5.2 0.1 1.5</size></box></geometry>
+          <material><ambient>0.72 0.72 0.68 1</ambient><diffuse>0.72 0.72 0.68 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -3.05 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>5.2 0.1 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>5.2 0.1 1.5</size></box></geometry>
+          <material><ambient>0.72 0.72 0.68 1</ambient><diffuse>0.72 0.72 0.68 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_east">
+      <static>true</static>
+      <pose>2.55 0 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.1 6.2 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.1 6.2 1.5</size></box></geometry>
+          <material><ambient>0.72 0.72 0.68 1</ambient><diffuse>0.72 0.72 0.68 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-2.55 0 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.1 6.2 1.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.1 6.2 1.5</size></box></geometry>
+          <material><ambient>0.72 0.72 0.68 1</ambient><diffuse>0.72 0.72 0.68 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ===================================================================== -->
+    <!--  RACKS  (rack.dae — 0.35 m × 0.11 m × 0.265 m, origin at min corner) -->
+    <!--  Collision box centred at local (0.175, 0.055, 0.1325)                -->
+    <!--  Group 1 left : Row A x=-1.800, Row B x=-1.450                        -->
+    <!--  Group 2 right: Row C x=+1.450, Row D x=+1.800                        -->
+    <!--  3 racks per row at y = -1.05 / 0.00 / +1.05                          -->
+    <!-- ===================================================================== -->
+
+    <!-- Row A  (x = -1.800) -->
+    <model name="rack_A1">
+      <static>true</static>
+      <pose>-1.800 -1.05 0 0 0 -1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="rack_A2">
+      <static>true</static>
+      <pose>-1.800 0.00 0 0 0 -1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="rack_A3">
+      <static>true</static>
+      <pose>-1.800 1.05 0 0 0 -1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Row B  (x = -1.450, back-to-back with Row A) -->
+    <model name="rack_B1">
+      <static>true</static>
+      <pose>-1.450 -1.05 0 0 0 1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="rack_B2">
+      <static>true</static>
+      <pose>-1.450 0.00 0 0 0 1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="rack_B3">
+      <static>true</static>
+      <pose>-1.450 1.05 0 0 0 1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Row C  (x = +1.450, back-to-back with Row D) -->
+    <model name="rack_C1">
+      <static>true</static>
+      <pose>1.450 -1.05 0 0 0 1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="rack_C2">
+      <static>true</static>
+      <pose>1.450 0.00 0 0 0 1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="rack_C3">
+      <static>true</static>
+      <pose>1.450 1.05 0 0 0 1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- Row D  (x = +1.800) -->
+    <model name="rack_D1">
+      <static>true</static>
+      <pose>1.800 -1.05 0 0 0 -1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="rack_D2">
+      <static>true</static>
+      <pose>1.800 0.00 0 0 0 -1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="rack_D3">
+      <static>true</static>
+      <pose>1.800 1.05 0 0 0 -1.5708</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><mesh><uri>model://description/meshes/rack.dae</uri></mesh></geometry>
+        </visual>
+        <collision name="collision">
+          <pose>0.175 0.055 0.1325 0 0 0</pose>
+          <geometry><box><size>0.35 0.11 0.265</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+  </world>
+</sdf>

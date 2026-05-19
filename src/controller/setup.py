@@ -29,6 +29,7 @@ setup(
             'simple_controller = controller.simple_controller:main',
             'noisy_controller = controller.noisy_controller:main',
             'twist_relay = controller.twist_relay:main',
+            'real_odom = controller.real_odom:main',
         ],
     },
 )
