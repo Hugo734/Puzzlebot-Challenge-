@@ -140,11 +140,32 @@ def _pose_to_transform(dx, dy, dtheta):
 # ──────────────────────────────────────────────────────────────────
 
 def scan_to_points(ranges, angle_min, angle_increment, range_min, range_max,
-                   laser_x=0.0, laser_y=0.0, laser_yaw=0.0):
-    """Project a laser scan into the robot base frame (laser offset applied)."""
-    angles  = angle_min + np.arange(len(ranges)) * angle_increment
+                   laser_x=0.0, laser_y=0.0, laser_yaw=0.0,
+                   scan_omega=0.0, scan_time=0.0):
+    """
+    Project a laser scan into the robot base frame, with optional per-ray
+    within-scan rotation deskewing.
+
+    At 10 Hz with 360 rays the laser sweeps for ~100 ms; during that
+    window the robot's heading changes by ω·scan_time, so ray i —
+    captured at fraction f_i of the sweep — must be rotated by ω·f_i·dt
+    relative to the scan-start heading.  Without this correction the
+    point cloud is *sheared* whenever the robot turns, and ICP / CSM
+    interpret the shear as a bogus pose-rotation, which is the most
+    common cause of "the map rotates while I drive" symptoms.
+
+    Set scan_omega=0 (default) to disable deskewing.
+    """
+    n       = len(ranges)
+    angles  = angle_min + np.arange(n) * angle_increment
     ranges  = np.array(ranges, dtype=np.float64)
     valid   = np.isfinite(ranges) & (ranges >= range_min) & (ranges <= range_max)
+
+    # Per-ray deskew heading offset
+    if scan_omega != 0.0 and scan_time > 0.0 and n > 1:
+        f = np.arange(n, dtype=np.float64) / (n - 1)
+        angles = angles + scan_omega * f * scan_time
+
     r       = ranges[valid]
     a       = angles[valid]
     xl      = r * np.cos(a)
@@ -153,6 +174,156 @@ def scan_to_points(ranges, angle_min, angle_increment, range_min, range_max,
     xs      = laser_x + cL * xl - sL * yl
     ys      = laser_y + sL * xl + cL * yl
     return np.column_stack((xs, ys))
+
+
+# ──────────────────────────────────────────────────────────────────
+# Range outlier filter (spike rejection)
+# ──────────────────────────────────────────────────────────────────
+
+def range_outlier_filter(ranges, max_jump=0.5, range_max=10.0):
+    """
+    Discard rays whose range differs from BOTH neighbours by more than
+    `max_jump` metres.  RPLidar A1 occasionally emits isolated spikes
+    (reflections off glass, dust motes, dark cloth) that, if integrated
+    into the map, project as ghost walls and pull ICP towards bad
+    matches.  This filter runs before scan_to_points and replaces such
+    spikes with `inf` (which scan_to_points then drops via its `valid`
+    mask).  Two-sided: a true wall edge survives because only ONE
+    neighbour differs.
+    """
+    r = np.array(ranges, dtype=np.float64)
+    n = len(r)
+    if n < 3:
+        return r
+    finite = np.isfinite(r) & (r >= 0.0) & (r <= range_max)
+    # Forward and backward neighbour differences
+    fwd = np.full(n, np.inf)
+    bwd = np.full(n, np.inf)
+    fwd[:-1] = np.where(finite[:-1] & finite[1:], np.abs(r[:-1] - r[1:]), 0.0)
+    bwd[1:]  = np.where(finite[1:]  & finite[:-1], np.abs(r[1:]  - r[:-1]), 0.0)
+    # Spike: differs from BOTH neighbours by more than max_jump
+    spike = finite & (fwd > max_jump) & (bwd > max_jump)
+    if spike.any():
+        r = r.copy()
+        r[spike] = np.inf
+    return r
+
+
+# ──────────────────────────────────────────────────────────────────
+# Correlative Scan Matcher  (Cartographer-style coarse-to-fine)
+# ──────────────────────────────────────────────────────────────────
+
+def correlative_scan_match(grid, cloud_base, init_pose,
+                           xy_radius=0.30, xy_step=0.05,
+                           th_radius=0.20, th_step=0.025,
+                           score_floor=0.0):
+    """
+    Brute-force search for the SE(2) pose that maximises the scan-to-map
+    score within a window around `init_pose`.
+
+    Unlike ICP, this is a *global* search inside the window — it cannot
+    get trapped by a local minimum, so it recovers cleanly when odometry
+    alone is far off from where the scan actually fits the map.  Followed
+    by a single ICP step it gives Cartographer-quality matching at a
+    fraction of the CPU.
+
+    Parameters
+    ----------
+    grid       : OccupancyGrid with a `.score_points(xs, ys, floor)` method
+    cloud_base : (N, 2) scan in base frame (deskewed)
+    init_pose  : (x, y, theta) odometry prediction
+    xy_radius  : half-width of (x, y) search window  (m)
+    xy_step    : grid step in (x, y)                 (m)
+    th_radius  : half-width of θ search window       (rad)
+    th_step    : grid step in θ                      (rad)
+    score_floor: clamp log-odds below this to 0 when scoring (only
+                 positive evidence rewards a match, so empty/unknown
+                 cells don't bias the search)
+
+    Returns
+    -------
+    (best_x, best_y, best_theta, best_score)
+    """
+    x0, y0, th0 = init_pose
+
+    dxs  = np.arange(-xy_radius, xy_radius + xy_step  / 2.0, xy_step,  dtype=np.float64)
+    dys  = np.arange(-xy_radius, xy_radius + xy_step  / 2.0, xy_step,  dtype=np.float64)
+    dths = np.arange(-th_radius, th_radius + th_step  / 2.0, th_step,  dtype=np.float64)
+
+    best_score   = -np.inf
+    best_dx      = 0.0
+    best_dy      = 0.0
+    best_dtheta  = 0.0
+
+    # Pre-convert to cell-space step deltas — we shift the lookup
+    # indices rather than the world coordinates, which keeps the inner
+    # bookkeeping integer.
+    res     = grid.resolution
+    dx_cells = np.round(dxs / res).astype(np.int32)
+    dy_cells = np.round(dys / res).astype(np.int32)
+
+    for dth in dths:
+        c, s = math.cos(th0 + dth), math.sin(th0 + dth)
+        # Rotate cloud by total heading (th0 + dth) into world axes,
+        # then translate by (x0, y0).  We do NOT add (dx, dy) yet —
+        # that's the inner-loop shift.
+        rot_x = c * cloud_base[:, 0] - s * cloud_base[:, 1]
+        rot_y = s * cloud_base[:, 0] + c * cloud_base[:, 1]
+
+        cx_base = np.floor(((rot_x + x0) - grid.origin_x) / res).astype(np.int32)
+        cy_base = np.floor(((rot_y + y0) - grid.origin_y) / res).astype(np.int32)
+
+        # Broadcast over (Nx, Ny, Np):  cx[i, j, k] = cx_base[k] + dx_cells[i]
+        cx = cx_base[None, None, :] + dx_cells[:, None, None]   # (Nx, 1, Np)
+        cy = cy_base[None, None, :] + dy_cells[None, :, None]   # (1, Ny, Np)
+
+        in_b = (cx >= 0) & (cx < grid.width) & (cy >= 0) & (cy < grid.height)
+        cx_safe = np.clip(cx, 0, grid.width  - 1)
+        cy_safe = np.clip(cy, 0, grid.height - 1)
+
+        vals = grid._log[np.broadcast_to(cy_safe, (len(dx_cells), len(dy_cells), len(cx_base))),
+                         np.broadcast_to(cx_safe, (len(dx_cells), len(dy_cells), len(cx_base)))]
+        # Clamp negative evidence to 0 — only positive log-odds reward
+        np.maximum(vals, score_floor, out=vals)
+        vals = vals * in_b
+        score_2d = vals.sum(axis=2)   # (Nx, Ny)
+
+        idx = int(np.argmax(score_2d))
+        i_x, i_y = divmod(idx, score_2d.shape[1])
+        s = float(score_2d[i_x, i_y])
+        if s > best_score:
+            best_score  = s
+            best_dx     = float(dxs[i_x])
+            best_dy     = float(dys[i_y])
+            best_dtheta = float(dth)
+
+    return (x0 + best_dx,
+            y0 + best_dy,
+            math.atan2(math.sin(th0 + best_dtheta), math.cos(th0 + best_dtheta)),
+            best_score)
+
+
+def multi_resolution_csm(grid, cloud_base, init_pose,
+                         coarse=(0.40, 0.10, 0.20, 0.05),
+                         fine  =(0.10, 0.02, 0.05, 0.01),
+                         score_floor=0.0):
+    """
+    Two-stage CSM: coarse window first, then a tighter window around the
+    coarse winner.  Costs ~2× a single fine pass but covers a 5× larger
+    search area, so it recovers from much larger odom errors without
+    blowing the per-scan time budget.
+    """
+    cx, cy, cth, cs_score = correlative_scan_match(
+        grid, cloud_base, init_pose,
+        xy_radius=coarse[0], xy_step=coarse[1],
+        th_radius=coarse[2], th_step=coarse[3],
+        score_floor=score_floor)
+    fx, fy, fth, fs_score = correlative_scan_match(
+        grid, cloud_base, (cx, cy, cth),
+        xy_radius=fine[0],   xy_step=fine[1],
+        th_radius=fine[2],   th_step=fine[3],
+        score_floor=score_floor)
+    return (fx, fy, fth), fs_score
 
 
 def transform_points(points, x, y, theta):

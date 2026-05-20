@@ -1,4 +1,5 @@
 import math
+import os
 from collections import deque
 
 import numpy as np
@@ -6,6 +7,8 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
 _qos_scan = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
@@ -16,7 +19,7 @@ _qos_scan = QoSProfile(
 
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry, OccupancyGrid as OccupancyGridMsg
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformStamped
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 from rclpy.time import Time
@@ -32,6 +35,7 @@ from slam.occupancy_grid import OccupancyGrid
 from slam.icp import (
     scan_to_points, transform_points, icp,
     voxel_downsample, polar_scan_correlation, scan_diff,
+    range_outlier_filter, multi_resolution_csm,
 )
 
 
@@ -121,6 +125,71 @@ class SLAMNode(Node):
         self.declare_parameter('pf_theta_spread',         0.20)
         self.declare_parameter('pf_sigma',                0.15)
 
+        # Correlative Scan Matcher (coarse-to-fine grid search).
+        # Angular search windows are intentionally NARROW so the matcher
+        # cannot pick a wrong rotation hypothesis 10°+ away from odom
+        # during a turn.  This is the principal defence against
+        # rotation drift; the per-scan clamp below is the safety net.
+        self.declare_parameter('csm_enabled',             True)
+        self.declare_parameter('csm_coarse_xy_radius',    0.40)
+        self.declare_parameter('csm_coarse_xy_step',      0.10)
+        self.declare_parameter('csm_coarse_th_radius',    0.10)   # ±5.7°
+        self.declare_parameter('csm_coarse_th_step',      0.025)  # 1.4°
+        self.declare_parameter('csm_fine_xy_radius',      0.10)
+        self.declare_parameter('csm_fine_xy_step',        0.02)
+        self.declare_parameter('csm_fine_th_radius',      0.025)  # ±1.4°
+        self.declare_parameter('csm_fine_th_step',        0.005)  # 0.29°
+        # Below this score (sum of log-odds at scan points) the map is
+        # too sparse to trust CSM — fall back to odom prop only.
+        self.declare_parameter('csm_min_score',           20.0)
+        # Map must have at least this many occupied cells in the local
+        # disc before CSM is considered useful.
+        self.declare_parameter('csm_min_occupied_cells',  80)
+
+        # Range outlier filter (RPLidar A1 spike rejection)
+        self.declare_parameter('outlier_filter_enabled',  True)
+        self.declare_parameter('outlier_max_jump',        0.5)
+
+        # Rotation correction clamp — limits per-scan |Δθ_matcher|.
+        # Clamp shrinks with the robot's odom-reported angular velocity:
+        # high ω → trust wheel odom (tighter clamp), low ω → allow more
+        # correction so accumulated drift can be undone.
+        self.declare_parameter('rot_clamp_stationary_deg', 6.0)
+        self.declare_parameter('rot_clamp_slow_deg',       3.0)
+        self.declare_parameter('rot_clamp_fast_deg',       1.0)
+        self.declare_parameter('rot_clamp_slow_omega',     0.20)   # rad/s
+        self.declare_parameter('rot_clamp_fast_omega',     0.60)   # rad/s
+
+        # ── Keyframe mode (matcher + map only run when stopped) ──
+        # On slippery floors (ceramic, polished concrete) wheel encoders
+        # over-report rotation during turns, the matcher gets dragged
+        # along, and the map smears.  In keyframe mode we only trust the
+        # scan matcher and integrate into the map during the moments
+        # when the robot is *physically stationary* — those scans carry
+        # zero slip and zero within-scan shear, so the pose-to-map
+        # correspondence is as good as it ever gets.  During motion the
+        # SLAM pose just rides the wheel odometry; any drift accumulated
+        # while moving gets snapped back the moment the robot stops.
+        self.declare_parameter('keyframe_mode',          True)
+        self.declare_parameter('keyframe_v_threshold',   0.02)   # m/s
+        self.declare_parameter('keyframe_w_threshold',   0.05)   # rad/s
+        # Need this many consecutive "still" scans before the matcher
+        # is allowed to run — the first one or two scans after stopping
+        # may still be deskewed from residual motion.
+        self.declare_parameter('keyframe_streak_min',    3)
+        # Loose flag — when False, fall back to old continuous-matching
+        # behaviour (useful for benchmarking).
+
+        # ── Localization mode ─────────────────────────────────────
+        # Provide map_yaml to pre-populate the grid from a saved map so ICP
+        # has structure from the very first scan.  Set initial_x/y/theta to
+        # the robot's approximate starting position in the saved map frame,
+        # or use RViz "2D Pose Estimate" → /initialpose to correct at runtime.
+        self.declare_parameter('map_yaml',        '')
+        self.declare_parameter('initial_x',       0.0)
+        self.declare_parameter('initial_y',       0.0)
+        self.declare_parameter('initial_theta',   0.0)
+
         # ── Parameters: scan / map gating ─────────────────────────
         self.declare_parameter('range_min',          0.12)
         self.declare_parameter('range_max',          10.0)
@@ -140,6 +209,10 @@ class SLAMNode(Node):
         w   = self.get_parameter('map_width').value
         h   = self.get_parameter('map_height').value
 
+        # ── Callback groups: scan is expensive, keep it off the TF/odom thread
+        self._scan_cbg = MutuallyExclusiveCallbackGroup()
+        self._main_cbg = MutuallyExclusiveCallbackGroup()
+
         # ── Occupancy grid ────────────────────────────────────────
         self.grid = OccupancyGrid(
             width=w, height=h, resolution=res,
@@ -151,10 +224,16 @@ class SLAMNode(Node):
             display_l_free=self.get_parameter('display_l_free').value,
         )
 
+        # ── Load saved map into grid (localization mode) ─────────
+        map_yaml = self.get_parameter('map_yaml').value
+        if map_yaml:
+            self._preload_map(os.path.expanduser(map_yaml))
+
         # ── State: SLAM / odom poses ──────────────────────────────
-        self._sx = 0.0
-        self._sy = 0.0
-        self._stheta = 0.0
+        self._sx = self.get_parameter('initial_x').value
+        self._sy = self.get_parameter('initial_y').value
+        self._stheta = (self.get_parameter('initial_theta').value
+                        or self.get_parameter('map_initial_heading').value)
 
         self._ox = 0.0
         self._oy = 0.0
@@ -163,12 +242,11 @@ class SLAMNode(Node):
 
         self._odom_buf = deque(maxlen=200)   # ~10 s of odom samples @ 20 Hz
 
-        # map→odom (seeded with map_initial_heading so the world
-        # frame is pre-rotated to room orientation at launch)
-        self._tf_x     = 0.0
-        self._tf_y     = 0.0
-        self._tf_theta = self.get_parameter('map_initial_heading').value
-        self._tf_initialised = False
+        # map→odom: computed from initial pose + odom=(0,0,0) at startup
+        self._tf_x     = self._sx
+        self._tf_y     = self._sy
+        self._tf_theta = self._stheta
+        self._tf_initialised = bool(map_yaml)
 
         # Scan history for fallback target & FFT pre-alignment.
         # Each entry: {'world': (N,2), 'base': (N,2), 'ranges': (M,)}
@@ -187,6 +265,10 @@ class SLAMNode(Node):
         # and would freeze the map publish cadence)
         self._scan_count = 0
 
+        # Keyframe-mode state: streak of consecutive "still" scans
+        self._still_streak = 0
+        self._was_keyframe = False  # for logging transitions
+
         # Pose at which the grid was last updated — used for the
         # minimum-movement gate (stationary jitter suppression).
         self._last_map_x     = 0.0
@@ -204,17 +286,20 @@ class SLAMNode(Node):
         self._pose_pub = self.create_publisher(PoseStamped, '/slam_pose', 10)
         self._tf_br    = TransformBroadcaster(self)
 
-        # 30 Hz map→odom heartbeat.  Higher than the scan rate so that
-        # — even when a long scan callback delays the next timer fire —
-        # the published TF never falls more than ~50 ms behind, well
-        # under the scan_timestamp_fix offset.  Without this, RViz drops
-        # /scan_fixed with "extrapolation into the future" errors.
-        self.create_timer(1.0 / 30.0, self._tf_timer_cb)
+        # 30 Hz map→odom heartbeat on the fast thread so the scan callback
+        # (ICP, CSM) cannot block it.
+        self.create_timer(1.0 / 30.0, self._tf_timer_cb,
+                          callback_group=self._main_cbg)
 
         self.create_subscription(Odometry, '/odom',
-                                 self._odom_callback, 10)
+                                 self._odom_callback, 10,
+                                 callback_group=self._main_cbg)
         self.create_subscription(LaserScan, '/scan',
-                                 self._scan_callback, _qos_scan)
+                                 self._scan_callback, _qos_scan,
+                                 callback_group=self._scan_cbg)
+        self.create_subscription(PoseWithCovarianceStamped, '/initialpose',
+                                 self._initialpose_cb, 10,
+                                 callback_group=self._main_cbg)
 
         if not _HAS_KDTREE:
             self.get_logger().warn(
@@ -225,6 +310,83 @@ class SLAMNode(Node):
             f'SLAM node started — {w}x{h} cells @ {res} m/cell '
             f'({w*res:.1f} x {h*res:.1f} m) — '
             f'scan-to-map ICP, point-to-line={self.get_parameter("icp_use_point_to_line").value}')
+
+    # ──────────────────────────────────────────────────────────────
+    # Map pre-loading (localization mode)
+    # ──────────────────────────────────────────────────────────────
+
+    def _preload_map(self, yaml_path: str) -> None:
+        """Populate self.grid._log from a saved PGM+YAML map."""
+        import yaml as _yaml
+        try:
+            with open(yaml_path) as f:
+                meta = _yaml.safe_load(f)
+
+            pgm = meta['image']
+            if not os.path.isabs(pgm):
+                pgm = os.path.join(os.path.dirname(yaml_path), pgm)
+
+            with open(pgm, 'rb') as f:
+                raw = f.read()
+
+            # Parse PGM P5 header
+            lines, i = [], 0
+            while len(lines) < 3:
+                end = raw.index(b'\n', i)
+                line = raw[i:end].decode().strip()
+                i = end + 1
+                if not line.startswith('#'):
+                    lines.append(line)
+            pw, ph = map(int, lines[1].split())
+
+            pixels = np.frombuffer(raw[i:i + pw * ph], dtype=np.uint8)
+            pixels = pixels.reshape((ph, pw)).astype(np.float32)
+
+            negate = int(meta.get('negate', 0))
+            o_th   = float(meta.get('occupied_thresh', 0.65))
+            f_th   = float(meta.get('free_thresh', 0.196))
+
+            occ = 1.0 - pixels / 255.0 if not negate else pixels / 255.0
+            occ = np.flipud(occ)   # PGM top=row0 → ROS bottom=row0
+
+            lo = np.zeros((ph, pw), dtype=np.float32)
+            lo[occ >= o_th] = float(self.grid.display_l_occ) * 2.0
+            lo[occ <  f_th] = float(self.grid.display_l_free) * 2.0
+
+            if pw == self.grid.width and ph == self.grid.height:
+                self.grid._log[:] = np.clip(lo, self.grid.l_min, self.grid.l_max)
+                self.get_logger().info(
+                    f'Pre-loaded saved map ({pw}×{ph}) into SLAM grid — '
+                    f'localization mode active')
+            else:
+                self.get_logger().warn(
+                    f'Saved map size ({pw}×{ph}) != SLAM grid '
+                    f'({self.grid.width}×{self.grid.height}); '
+                    'map preload skipped — starting empty')
+        except Exception as exc:
+            self.get_logger().error(f'_preload_map failed: {exc}')
+
+    def _set_pose(self, x: float, y: float, theta: float) -> None:
+        """Snap SLAM pose to (x, y, theta) and recompute map→odom."""
+        self._sx      = x
+        self._sy      = y
+        self._stheta  = theta
+        # map→odom such that: map_pose ⊕ odom = slam_pose
+        self._tf_x, self._tf_y, self._tf_theta = _se2_compose(
+            (x, y, theta),
+            _se2_inverse((self._ox, self._oy, self._otheta)))
+        self._tf_initialised = True
+        self.get_logger().info(
+            f'Pose set to ({x:.3f}, {y:.3f}, {math.degrees(theta):.1f}°)')
+
+    def _initialpose_cb(self, msg: PoseWithCovarianceStamped) -> None:
+        """RViz "2D Pose Estimate" → snap SLAM to the given pose."""
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        siny = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        theta = math.atan2(siny, cosy)
+        self._set_pose(float(p.x), float(p.y), theta)
 
     # ──────────────────────────────────────────────────────────────
     # TF heartbeat
@@ -320,41 +482,98 @@ class SLAMNode(Node):
         range_min = self.get_parameter('range_min').value
         range_max = self.get_parameter('range_max').value
 
+        # ── Range vector + outlier filter + sub-sampling ─────────
+        ranges_raw = np.array(msg.ranges, dtype=np.float64)
+        if self.get_parameter('outlier_filter_enabled').value:
+            ranges_raw = range_outlier_filter(
+                ranges_raw,
+                max_jump=self.get_parameter('outlier_max_jump').value,
+                range_max=range_max)
+
         ray_step = self.get_parameter('ray_step').value
         if ray_step > 1:
-            ranges_sub = np.array(msg.ranges, dtype=np.float64)[::ray_step]
+            ranges_sub = ranges_raw[::ray_step]
             angle_inc  = msg.angle_increment * ray_step
         else:
-            ranges_sub = np.array(msg.ranges, dtype=np.float64)
+            ranges_sub = ranges_raw
             angle_inc  = msg.angle_increment
 
+        # ── Compute scan_omega FIRST so the cloud can be deskewed ─
+        # The map update has always applied per-ray deskew internally
+        # (via update_scan); now the cloud passed to scan matching is
+        # deskewed the same way, so the matcher no longer interprets
+        # the within-scan shear as bogus pose rotation.
+        scan_dur = msg.scan_time if msg.scan_time > 0.0 else 0.1
+        _, _, theta_end = self._odom_at(scan_t + scan_dur)
+        scan_omega = (_wrap(theta_end - scan_otheta) / scan_dur
+                      if scan_dur > 0 else 0.0)
+
+        # ── Build the deskewed point cloud (base frame) ──────────
         cloud = scan_to_points(
             ranges_sub, msg.angle_min, angle_inc,
             range_min, range_max,
-            laser_x=lx, laser_y=ly, laser_yaw=lyaw)
+            laser_x=lx, laser_y=ly, laser_yaw=lyaw,
+            scan_omega=scan_omega, scan_time=scan_dur)
 
         if len(cloud) < self.get_parameter('icp_min_points').value:
             return
 
         # ── Pose propagation: odom-derived initial guess ─────────
         self._propagate_from_odom()
+        pre_match_theta = self._stheta
 
-        # ── Scan matcher (ICP) ───────────────────────────────────
-        use_icp = self.get_parameter('use_icp').value
-        if use_icp:
-            self._run_scan_matcher(cloud, ranges_sub)
+        # ── Keyframe gate: only run matcher + map update when the
+        # robot is physically stationary.  On slippery floors the
+        # wheel encoders over-report rotation during motion; running
+        # the matcher mid-motion drags it along with the slip and
+        # smears the map.  When the robot stops, slip and within-scan
+        # shear both vanish, so the scan-to-map correspondence is
+        # clean and the matcher can snap the pose back to its true
+        # value.  Outside keyframes the SLAM pose just rides odom.
+        keyframe_mode = self.get_parameter('keyframe_mode').value
+        v_thr = self.get_parameter('keyframe_v_threshold').value
+        w_thr = self.get_parameter('keyframe_w_threshold').value
+        still = (abs(scan_omega) < w_thr and self._odom_speed() < v_thr)
+        if still:
+            self._still_streak += 1
+        else:
+            self._still_streak = 0
+        streak_min = int(self.get_parameter('keyframe_streak_min').value)
+        in_keyframe = (not keyframe_mode) or (self._still_streak >= streak_min)
+
+        if not self._was_keyframe and in_keyframe:
+            self.get_logger().info(
+                f'KEYFRAME enter  streak={self._still_streak}  '
+                f'odom_v={self._odom_speed():.3f}  |ω|={abs(scan_omega):.3f}',
+                throttle_duration_sec=0.5)
+        elif self._was_keyframe and not in_keyframe:
+            self.get_logger().info('KEYFRAME exit (motion)',
+                                   throttle_duration_sec=0.5)
+        self._was_keyframe = in_keyframe
+
+        # ── Scan matcher: CSM (coarse-to-fine) + ICP refinement ──
+        # Only runs inside keyframes.  matcher_state semantics same
+        # as before:  True=accepted, False=rejected, None=didn't run.
+        matcher_state = None
+        if in_keyframe and self.get_parameter('use_icp').value:
+            matcher_state = self._run_scan_matcher(cloud, ranges_sub)
+        matcher_ok       = (matcher_state is True)
+        matcher_rejected = (matcher_state is False)
+
+        # ── Rotation correction clamp ────────────────────────────
+        # When we are inside a keyframe and have just accepted a
+        # match, allow the matcher to apply a larger correction than
+        # the per-scan clamp would normally permit — keyframes are
+        # explicitly the moments when we trust the matcher to undo
+        # the drift that accumulated during the previous motion.
+        if matcher_ok and not in_keyframe:
+            self._clamp_rotation_correction(pre_match_theta, scan_omega)
 
         # ── Recompute map→odom from refined SLAM pose ────────────
         new_tf = _se2_compose(
             (self._sx, self._sy, self._stheta),
             _se2_inverse((self._ox, self._oy, self._otheta)))
 
-        # EMA smoothing on the TF to suppress per-scan jitter in
-        # the displayed robot pose.  We then re-derive the SLAM
-        # pose from the smoothed TF so /slam_pose and the TF stay
-        # consistent — the smoothed pose is what the map is
-        # updated with too, so the displayed robot icon and the
-        # map remain registered.
         alpha = self.get_parameter('tf_smoothing_alpha').value
         if alpha < 1.0 and self._tf_initialised:
             self._tf_x = alpha * new_tf[0] + (1.0 - alpha) * self._tf_x
@@ -371,19 +590,32 @@ class SLAMNode(Node):
             (self._ox, self._oy, self._otheta))
 
         # ── Map update at scan-time SLAM pose ────────────────────
+        # In keyframe mode, only integrate during keyframes — motion
+        # scans never touch the map (which is what keeps the walls
+        # from smearing).
         scan_slam = _se2_compose(
             (self._tf_x, self._tf_y, self._tf_theta),
             (scan_ox, scan_oy, scan_otheta))
 
-        scan_dur = msg.scan_time if msg.scan_time > 0.0 else 0.1
-        _, _, theta_end = self._odom_at(scan_t + scan_dur)
-        scan_omega = (_wrap(theta_end - scan_otheta) / scan_dur
-                      if scan_dur > 0 else 0.0)
+        if not in_keyframe:
+            # Outside keyframes the map→odom TF stays frozen at the
+            # last keyframe's value.  The SLAM pose (self._sx,_sy,_stheta)
+            # already follows the latest odom (set by _propagate_from_odom
+            # above), so /slam_pose and the live TF chain still track the
+            # robot accurately — only the map and the matcher take a break.
+            now = self.get_clock().now().to_msg()
+            self._publish_pose(now)
+            self._publish_tf(now)
+            self._scan_count += 1
+            if self._scan_count % self.get_parameter('map_publish_every').value == 0:
+                self._publish_map(now)
+            return
 
         self._maybe_update_map(
             scan_slam, ranges_sub, msg.angle_min, angle_inc,
             range_min, range_max, lx, ly, lyaw,
-            scan_omega, scan_dur)
+            scan_omega, scan_dur,
+            matcher_rejected=matcher_rejected)
 
         # ── Publish ──────────────────────────────────────────────
         now = self.get_clock().now().to_msg()
@@ -405,19 +637,19 @@ class SLAMNode(Node):
         self._last_ranges = np.array(ranges_sub, dtype=np.float64)
 
     # ──────────────────────────────────────────────────────────────
-    # Scan matcher: scan-to-map ICP w/ fallback to scan-to-scan
+    # Scan matcher: CSM (coarse-to-fine) + ICP refinement, scan-to-map
+    # with scan-to-scan fallback when the map is still empty
     # ──────────────────────────────────────────────────────────────
 
     def _build_target(self):
         """
-        Choose ICP target:
+        Choose matcher target:
           1. occupied-cell point cloud around the robot (scan-to-map)
-          2. concatenation of last N scans in world frame (scan-to-scan fallback)
+          2. concatenation of last N scans in world frame (fallback)
         Returns (target_points, mode_string) or (None, None) if no target.
         """
         min_pts = self.get_parameter('icp_min_points').value
 
-        # Try scan-to-map first
         map_radius = self.get_parameter('icp_map_radius').value
         threshold  = self.get_parameter('icp_map_occ_threshold').value
         if threshold < 0.0:
@@ -438,7 +670,6 @@ class SLAMNode(Node):
         if len(map_pts) >= min_pts:
             return map_pts, 'map'
 
-        # Fallback: scan-to-scan over accumulated history
         if len(self._scan_buf) > 0:
             stacked = np.vstack([s['world'] for s in self._scan_buf])
             if len(stacked) >= min_pts:
@@ -447,13 +678,60 @@ class SLAMNode(Node):
         return None, None
 
     def _run_scan_matcher(self, cloud, ranges_sub):
+        """
+        Two-stage matcher operating around the current SLAM pose
+        (self._sx/_sy/_stheta, already propagated from latest odom):
+          1.  CSM coarse-to-fine — global search in a (xy, θ) window
+              over the local map.  Skipped when the map is too sparse.
+          2.  Point-to-line ICP refinement on top of CSM (or odom).
+
+        Modifies self._sx/_sy/_stheta in place when a match is accepted.
+        Returns True iff the matcher produced a pose we trust enough to
+        commit to /slam_pose AND integrate the scan into the map.
+        """
         target, mode = self._build_target()
         if target is None:
-            return  # not enough reference geometry yet
+            return None    # didn't run — caller treats as "warmup"
 
-        # ── Optional FFT pre-alignment (rotation init guess) ─────
+        # ── Stage 1: CSM (only when map is dense enough) ────────
+        use_csm = (
+            self.get_parameter('csm_enabled').value
+            and mode == 'map'
+            and len(target) >= self.get_parameter('csm_min_occupied_cells').value)
+
+        csm_pose  = (self._sx, self._sy, self._stheta)
+        csm_score = -np.inf
+        if use_csm:
+            coarse = (
+                self.get_parameter('csm_coarse_xy_radius').value,
+                self.get_parameter('csm_coarse_xy_step').value,
+                self.get_parameter('csm_coarse_th_radius').value,
+                self.get_parameter('csm_coarse_th_step').value,
+            )
+            fine = (
+                self.get_parameter('csm_fine_xy_radius').value,
+                self.get_parameter('csm_fine_xy_step').value,
+                self.get_parameter('csm_fine_th_radius').value,
+                self.get_parameter('csm_fine_th_step').value,
+            )
+            csm_pose, csm_score = multi_resolution_csm(
+                self.grid, cloud,
+                init_pose=(self._sx, self._sy, self._stheta),
+                coarse=coarse, fine=fine, score_floor=0.0)
+
+            if csm_score < self.get_parameter('csm_min_score').value:
+                csm_pose  = (self._sx, self._sy, self._stheta)
+                use_csm   = False
+            else:
+                # Commit the CSM pose so the ICP refinement starts there.
+                self._sx, self._sy, self._stheta = csm_pose
+
+        # ── Stage 2: ICP refinement around CSM (or odom) ─────────
+        # FFT prealign helps ONLY when no CSM ran (CSM already handles
+        # large rotations; a second prealign would double-count it).
         init_dtheta = 0.0
-        if (self.get_parameter('icp_fft_prealign').value
+        if (not use_csm
+                and self.get_parameter('icp_fft_prealign').value
                 and len(self._scan_buf) > 0):
             prev_base = self._scan_buf[-1]['base']
             fft_dth   = polar_scan_correlation(
@@ -463,7 +741,6 @@ class SLAMNode(Node):
             if abs(fft_dth) <= max_fft:
                 init_dtheta = fft_dth
 
-        # ── ICP ──────────────────────────────────────────────────
         curr_world = transform_points(cloud, self._sx, self._sy, self._stheta)
         dx, dy, dtheta, fitness, converged = icp(
             source=curr_world,
@@ -477,7 +754,6 @@ class SLAMNode(Node):
             normal_neighbors=self.get_parameter('icp_normal_neighbors').value,
         )
 
-        # ── Quality gates ────────────────────────────────────────
         accept, reason = self._evaluate_icp(converged, fitness, dx, dy, dtheta)
 
         if accept:
@@ -485,21 +761,17 @@ class SLAMNode(Node):
                 (dx, dy, dtheta), (self._sx, self._sy, self._stheta))
             self._fitness_history.append(fitness)
             self._consecutive_bad = 0
-            return
+            return True
 
         # ── Rejected ─────────────────────────────────────────────
         self._consecutive_bad += 1
         self.get_logger().warn(
-            f'ICP rejected ({reason}, mode={mode}): '
-            f'converged={converged} fit={fitness:.3f} '
-            f'Δ=({dx:+.2f}, {dy:+.2f}, {math.degrees(dtheta):+.1f}°) '
+            f'Matcher rejected ({reason}, mode={mode}, csm_score={csm_score:.1f}): '
+            f'fit={fitness:.3f} '
+            f'Δicp=({dx:+.2f}, {dy:+.2f}, {math.degrees(dtheta):+.1f}°) '
             f'bad_streak={self._consecutive_bad}',
             throttle_duration_sec=2.0)
 
-        # ── Recovery: particle filter snap to best hypothesis ────
-        # We always reset the streak after a PF attempt so the next
-        # `recovery_bad_streak` scans contribute to the next decision
-        # rather than triggering PF every single frame.
         bad_threshold = self.get_parameter('recovery_bad_streak').value
         if self._consecutive_bad >= bad_threshold and mode == 'map':
             applied = self._trigger_particle_recovery(cloud, target)
@@ -508,6 +780,8 @@ class SLAMNode(Node):
                     'Particle-filter recovery applied — pose snapped to '
                     f'best-of-{self.get_parameter("pf_n_particles").value}')
             self._consecutive_bad = 0
+
+        return False
 
     def _evaluate_icp(self, converged, fitness, dx, dy, dtheta):
         """
@@ -543,14 +817,52 @@ class SLAMNode(Node):
         return True, 'ok'
 
     # ──────────────────────────────────────────────────────────────
+    # Per-scan rotation correction clamp
+    # ──────────────────────────────────────────────────────────────
+
+    def _clamp_rotation_correction(self, pre_theta, scan_omega):
+        """
+        Limit |θ_matched − θ_odom_predicted| to a per-scan budget that
+        depends on the current angular velocity.
+
+        Tuning principle: a wheel-encoder ω of W rad/s integrated over
+        one scan period (0.1 s) gives a rotation Wdt with uncertainty
+        typically ≪ 1°.  Any matcher disagreement larger than the budget
+        therefore reflects a bad scan-to-map registration rather than
+        an actual odometry error, and we suppress it.
+
+        We deliberately leave the x/y correction untouched — translation
+        is usually well-resolved by the matcher even when rotation gets
+        confused, and clamping x/y in lock-step would prevent legitimate
+        position drift fixes.
+        """
+        omega_abs = abs(scan_omega)
+        if omega_abs >= self.get_parameter('rot_clamp_fast_omega').value:
+            max_deg = self.get_parameter('rot_clamp_fast_deg').value
+        elif omega_abs >= self.get_parameter('rot_clamp_slow_omega').value:
+            max_deg = self.get_parameter('rot_clamp_slow_deg').value
+        else:
+            max_deg = self.get_parameter('rot_clamp_stationary_deg').value
+        max_dth = math.radians(max_deg)
+
+        dth = _wrap(self._stheta - pre_theta)
+        if abs(dth) > max_dth:
+            clamped = math.copysign(max_dth, dth)
+            self._stheta = _wrap(pre_theta + clamped)
+            self.get_logger().info(
+                f'Rotation clamp: {math.degrees(dth):+.1f}° → '
+                f'{math.degrees(clamped):+.1f}° (|ω|={omega_abs:.2f} rad/s)',
+                throttle_duration_sec=2.0)
+
+    # ──────────────────────────────────────────────────────────────
     # Particle filter recovery
     # ──────────────────────────────────────────────────────────────
 
     def _trigger_particle_recovery(self, cloud_base, map_pts):
         """
         Sample N pose hypotheses around the current SLAM estimate, score
-        each against the local map, snap to the best.  Returns True if
-        a non-identity particle won (i.e. we actually corrected something).
+        each against the local map, snap to the best.  Returns True if a
+        non-identity particle won (i.e. we actually corrected something).
         """
         if not _HAS_KDTREE or len(map_pts) < 50:
             return False
@@ -560,7 +872,7 @@ class SLAMNode(Node):
         sth   = self.get_parameter('pf_theta_spread').value
         sigma = self.get_parameter('pf_sigma').value
 
-        # Particle 0 is the current pose (so we never make things worse)
+        # Particle 0 is the current pose (so we never make things worse).
         dxs  = self._rng.normal(0.0, sxy, n); dxs[0]  = 0.0
         dys  = self._rng.normal(0.0, sxy, n); dys[0]  = 0.0
         dths = self._rng.normal(0.0, sth, n); dths[0] = 0.0
@@ -575,7 +887,6 @@ class SLAMNode(Node):
             th = _wrap(self._stheta + dths[i])
             world_pts = transform_points(cloud_base, x, y, th)
             dists, _  = tree.query(world_pts, k=1)
-            # Robust likelihood: sum of bounded Gaussian kernels
             score = float(np.sum(np.exp(-(dists ** 2) / (sigma ** 2))))
             if score > best_score:
                 best_score = score
@@ -595,9 +906,22 @@ class SLAMNode(Node):
 
     def _maybe_update_map(self, scan_slam, ranges_sub, angle_min, angle_inc,
                           range_min, range_max, lx, ly, lyaw,
-                          scan_omega, scan_dur):
+                          scan_omega, scan_dur, matcher_rejected=False):
         """
-        Apply min-motion + scan-change gate, then run the log-odds update.
+        Apply motion + confidence gates, then run the log-odds update.
+
+        Confidence gate:
+          - If the matcher ran and EXPLICITLY rejected the scan
+            (matcher_rejected=True), we hold off on integration.
+            Committing a scan at a wrong pose to the map is the loop
+            that produces the rotating-walls effect: bad pose → bad map
+            → worse match → worse pose.  Skipping breaks the loop.
+          - If the matcher did NOT run (no target — typical during the
+            warmup before the local map has any structure) we integrate
+            anyway: this is how the map bootstraps from odometry.
+            Previously we required matcher_confident=True here, which
+            deadlocked the bootstrap because the matcher cannot run
+            without a target and the map cannot grow without integration.
         """
         sx, sy, sth = scan_slam
         min_xy    = self.get_parameter('min_delta_xy').value
@@ -609,9 +933,6 @@ class SLAMNode(Node):
             or abs(_wrap(sth - self._last_map_theta)) >= min_theta
         )
 
-        # Adaptive motion gate: even if odom hasn't moved much, force an
-        # update when the scan itself changed significantly — protects
-        # against silent odom drift / wheel slip.
         scene_changed = False
         if not moved and self._last_ranges is not None and min_scan > 0:
             scene_changed = (
@@ -619,6 +940,12 @@ class SLAMNode(Node):
                           range_max=range_max) >= min_scan)
 
         if not (moved or scene_changed):
+            return
+
+        if matcher_rejected:
+            self.get_logger().warn(
+                'Map update skipped — matcher rejected this scan',
+                throttle_duration_sec=2.0)
             return
 
         self.grid.update_scan(
@@ -640,6 +967,17 @@ class SLAMNode(Node):
         self._sx, self._sy, self._stheta = _se2_compose(
             (self._tf_x, self._tf_y, self._tf_theta),
             (self._ox, self._oy, self._otheta))
+
+    def _odom_speed(self):
+        """Estimate |v| from the last two odom samples (m/s)."""
+        if len(self._odom_buf) < 2:
+            return 0.0
+        t1, x1, y1, _ = self._odom_buf[-1]
+        t0, x0, y0, _ = self._odom_buf[-2]
+        dt = t1 - t0
+        if dt <= 0.0:
+            return 0.0
+        return math.hypot(x1 - x0, y1 - y0) / dt
 
     # ──────────────────────────────────────────────────────────────
     # Publishers
@@ -695,8 +1033,11 @@ class SLAMNode(Node):
 def main():
     rclpy.init()
     node = SLAMNode()
+    # Two threads: scan callback (ICP/CSM, slow) + TF/odom heartbeat (fast).
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

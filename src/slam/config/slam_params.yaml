@@ -52,7 +52,7 @@ slam_node:
     # we still loosen this so the convergence flag is informative again.
     icp_tolerance:          0.005
     icp_reject_dist:        0.5     # generous for noisy real LiDAR
-    icp_min_points:         25
+    icp_min_points:         15      # lowered from 25 so the matcher can engage on sparser maps
     icp_max_fitness:        0.25    # hard ceiling on RMS inlier error (m)
 
     # Point-to-line ICP (much more stable on long walls + corners)
@@ -96,6 +96,55 @@ slam_node:
     pf_xy_spread:           0.20   # m  std-dev of xy perturbation
     pf_theta_spread:        0.20   # rad std-dev of θ perturbation
     pf_sigma:               0.15   # m  kernel bandwidth in the score
+
+    # ── Correlative Scan Matcher (coarse-to-fine grid search) ────
+    # Search WINDOWS are deliberately narrow.  Wheel odometry rotation
+    # is highly reliable over a single 100 ms scan period (≪ 1° error),
+    # so giving CSM a ±17° window — as the original tuning did — was an
+    # invitation to pick a wrong local maximum 10° away from reality.
+    # ±5.7° is enough margin for any plausible per-scan odom error;
+    # together with the rot-clamp below the matcher cannot run away
+    # rotationally even when the map is sparse or symmetric.
+    csm_enabled:            true
+    csm_coarse_xy_radius:   0.40    # m
+    csm_coarse_xy_step:     0.10    # m  (= 2 cells)
+    csm_coarse_th_radius:   0.10    # rad (~5.7°)
+    csm_coarse_th_step:     0.025   # rad (~1.4°)
+    csm_fine_xy_radius:     0.10    # m
+    csm_fine_xy_step:       0.02    # m
+    csm_fine_th_radius:     0.025   # rad (~1.4°)
+    csm_fine_th_step:       0.005   # rad (~0.29°)
+    csm_min_score:          15.0
+    # Lowered from 80 → 30: CSM needs enough cells to be useful, but
+    # 80 was so high that during bootstrap (small map ≈ 50 cells) the
+    # matcher fell back to ICP-only on sparse maps, which produces wild
+    # 100°+ rotation guesses that the gate then rejects → map stops
+    # growing → matcher stays broken.  30 lets CSM engage as soon as
+    # the warmup has put a few walls into the map.
+    csm_min_occupied_cells: 30
+
+    # ── Rotation correction clamp (rotation drift safety net) ────
+    # Hard limit on |Δθ_matcher − Δθ_odom| per scan, in degrees.  The
+    # clamp tightens with the robot's odom-reported angular velocity:
+    #   |ω| < slow_omega         → stationary    bucket (most lenient)
+    #   slow_omega ≤ |ω| < fast  → slow turn     bucket
+    #   |ω| ≥ fast_omega         → fast turn     bucket (most strict)
+    # Rationale: wheel encoders integrate fast turns with low absolute
+    # error; the matcher's rotation estimate, by contrast, gets worse
+    # at high ω (sparser rays per angular bucket, more deskew sensitivity).
+    rot_clamp_stationary_deg: 6.0
+    rot_clamp_slow_deg:       3.0
+    rot_clamp_fast_deg:       1.0
+    rot_clamp_slow_omega:     0.20   # rad/s (~11°/s)
+    rot_clamp_fast_omega:     0.60   # rad/s (~34°/s)
+
+    # ── Range outlier filter ─────────────────────────────────────
+    # RPLidar A1 occasionally emits isolated range spikes (glass,
+    # dark cloth, dust).  Rays whose value differs from BOTH polar
+    # neighbours by > outlier_max_jump are dropped — true wall
+    # edges have only ONE differing neighbour so they survive.
+    outlier_filter_enabled: true
+    outlier_max_jump:       0.5
 
     # ── TF smoothing ─────────────────────────────────────────────
     # EMA on the published map→odom transform.  Setting this < 1.0

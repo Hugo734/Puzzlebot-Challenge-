@@ -156,6 +156,34 @@ class OccupancyGrid:
         np.clip(self._log, self.l_min, self.l_max, out=self._log)
 
     # ------------------------------------------------------------------
+    # Batched scoring (for the correlative scan matcher)
+    # ------------------------------------------------------------------
+
+    def score_points(self, xs, ys, score_floor=0.0):
+        """
+        Sum the log-odds at the cells under each (x, y) world point.
+
+        Used by the correlative scan matcher to score candidate poses:
+        for a given hypothesis we transform the scan into world frame
+        and ask "how much positive evidence does this pose accumulate?"
+
+        Points outside the map contribute 0.  `score_floor` clamps the
+        per-cell contribution from below (default 0): unknown / free
+        cells don't penalise a hypothesis, only occupied cells reward
+        it.  Without this, an empty corner of the map would attract
+        the search (because it's "less negative" than the wrong wall).
+        """
+        cx = np.floor((xs - self.origin_x) / self.resolution).astype(np.int32)
+        cy = np.floor((ys - self.origin_y) / self.resolution).astype(np.int32)
+        in_b = (cx >= 0) & (cx < self.width) & (cy >= 0) & (cy < self.height)
+        if not in_b.any():
+            return 0.0
+        cx = cx[in_b]; cy = cy[in_b]
+        vals = self._log[cy, cx]
+        vals = np.maximum(vals, score_floor)
+        return float(vals.sum())
+
+    # ------------------------------------------------------------------
     # Point-cloud extraction (for scan-to-map ICP)
     # ------------------------------------------------------------------
 
