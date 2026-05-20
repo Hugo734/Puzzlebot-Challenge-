@@ -93,6 +93,7 @@ class RosBridge:
         self._mission_pub = self._node.create_publisher(String, "/mission", reliable_qos)
         self._goal_pub = self._node.create_publisher(String, "/goal_waypoint", reliable_qos)
         self._cmd_vel_pub = self._node.create_publisher(Twist, "/cmd_vel", reliable_qos)
+        self._voice_pub = self._node.create_publisher(String, "/voice_command", reliable_qos)
 
         # Load waypoints from file at startup
         self._load_waypoints()
@@ -154,6 +155,13 @@ class RosBridge:
         msg = String()
         msg.data = name
         self._goal_pub.publish(msg)
+
+    def publish_voice_command(self, word: str) -> None:
+        """Publish a recognised word to /voice_command."""
+        from std_msgs.msg import String
+        msg = String()
+        msg.data = word
+        self._voice_pub.publish(msg)
 
     def publish_cmd_vel(self, linear: float, angular: float) -> None:
         """Publish a Twist command to /cmd_vel."""

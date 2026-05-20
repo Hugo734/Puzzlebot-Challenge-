@@ -796,3 +796,83 @@ body {
   .panel-map { height: 60vw; min-height: 300px; }
   .panel-right { overflow: visible; }
 }
+
+/* ===================================================================
+   VOICE TAB
+   =================================================================== */
+
+.voice-btn-row {
+  display: flex;
+  justify-content: center;
+  margin: 12px 0 8px;
+}
+
+.btn-voice-record {
+  background: var(--surface);
+  color: var(--accent);
+  border: 2px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 12px 28px;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+  width: 100%;
+  letter-spacing: 0.05em;
+}
+.btn-voice-record:hover { background: rgba(0,255,136,0.08); }
+.btn-voice-record.recording {
+  background: rgba(255, 77, 109, 0.2);
+  border-color: var(--danger);
+  color: var(--danger);
+  box-shadow: 0 0 12px rgba(255,77,109,0.4);
+  animation: pulse-rec 0.8s ease-in-out infinite alternate;
+}
+@keyframes pulse-rec {
+  from { box-shadow: 0 0 8px rgba(255,77,109,0.3); }
+  to   { box-shadow: 0 0 18px rgba(255,77,109,0.7); }
+}
+
+.voice-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+.voice-status {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--dim);
+}
+.voice-status.recording { color: var(--danger); }
+.voice-status.processing { color: var(--warn); }
+.voice-status.done { color: var(--accent); }
+.voice-status.error { color: var(--danger); }
+
+.voice-result-box {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 10px 0 6px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--accent);
+}
+.voice-result-label { font-size: 0.75rem; color: var(--dim); }
+.voice-result-word  { font-size: 1.3rem; letter-spacing: 0.04em; }
+
+.voice-vocab {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.voice-vocab-chip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 3px 10px;
+  font-size: 0.75rem;
+  color: var(--text);
+}

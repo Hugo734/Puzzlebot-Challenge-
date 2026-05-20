@@ -742,6 +742,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initEditMode();
   initMapInteraction();
   initWaypointPopup();
+  initVoice();
 
   // Try to preload map immediately
   _mapImg.src = '/api/map';
@@ -856,4 +857,163 @@ function pad(n) { return String(n).padStart(2, '0'); }
 function formatLocation(loc) {
   if (!loc) return '—';
   return loc.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// ---------------------------------------------------------------------------
+// Voice tab
+// ---------------------------------------------------------------------------
+
+let _mediaRecorder  = null;
+let _audioChunks    = [];
+let _voiceRecording = false;
+
+socket.on('voice_result', (data) => {
+  if (data && data.word) {
+    _showVoiceResult(data.word);
+  }
+});
+
+async function initVoice() {
+  // Load vocabulary from server
+  try {
+    const res  = await fetch('/api/voice/status');
+    const data = await res.json();
+    const statusEl = document.getElementById('voiceModelStatus');
+    const vocabEl  = document.getElementById('voiceVocab');
+
+    if (data.ready) {
+      if (statusEl) statusEl.textContent = `HMM ready — ${data.vocabulary.length} words`;
+      if (vocabEl) {
+        vocabEl.innerHTML = data.vocabulary
+          .map(w => `<span class="voice-vocab-chip">${w}</span>`)
+          .join('');
+      }
+    } else {
+      if (statusEl) statusEl.textContent = 'Models not found — train first';
+    }
+  } catch (_) {}
+
+  const btn = document.getElementById('btnVoiceRecord');
+  if (!btn) return;
+
+  // Touch/pointer events for hold-to-record
+  btn.addEventListener('pointerdown', (e) => { e.preventDefault(); _startRecording(); });
+  btn.addEventListener('pointerup',   (e) => { e.preventDefault(); _stopRecording();  });
+  btn.addEventListener('pointerleave',(e) => { if (_voiceRecording) _stopRecording(); });
+
+  // Keyboard shortcut: hold V to record
+  document.addEventListener('keydown', (e) => {
+    if (e.code === 'KeyV' && !_voiceRecording && !_isInputFocused()) {
+      e.preventDefault();
+      _startRecording();
+    }
+  });
+  document.addEventListener('keyup', (e) => {
+    if (e.code === 'KeyV' && _voiceRecording) {
+      e.preventDefault();
+      _stopRecording();
+    }
+  });
+}
+
+async function _startRecording() {
+  if (_voiceRecording) return;
+  _voiceRecording = true;
+
+  const btn = document.getElementById('btnVoiceRecord');
+  _setVoiceStatus('recording', '&#9679; Recording…');
+  btn?.classList.add('recording');
+  btn && (btn.textContent = '⬛ Release to Send');
+
+  _audioChunks = [];
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {sampleRate: 16000, channelCount: 1, echoCancellation: true},
+    });
+
+    const opts = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? {mimeType: 'audio/webm;codecs=opus'}
+      : {};
+    _mediaRecorder = new MediaRecorder(stream, opts);
+
+    _mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) _audioChunks.push(e.data);
+    };
+
+    _mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      await _sendAudio();
+    };
+
+    _mediaRecorder.start(100); // collect in 100ms chunks
+  } catch (err) {
+    _setVoiceStatus('error', 'Mic error: ' + err.message);
+    _voiceRecording = false;
+    btn?.classList.remove('recording');
+    btn && (btn.textContent = '● Hold to Record');
+  }
+}
+
+function _stopRecording() {
+  if (!_voiceRecording) return;
+  _voiceRecording = false;
+
+  const btn = document.getElementById('btnVoiceRecord');
+  btn?.classList.remove('recording');
+  btn && (btn.textContent = '● Hold to Record');
+  _setVoiceStatus('processing', 'Processing…');
+
+  if (_mediaRecorder && _mediaRecorder.state !== 'inactive') {
+    _mediaRecorder.stop();
+  }
+}
+
+async function _sendAudio() {
+  if (_audioChunks.length === 0) {
+    _setVoiceStatus('error', 'No audio captured');
+    return;
+  }
+
+  const blob = new Blob(_audioChunks, {type: _mediaRecorder?.mimeType || 'audio/webm'});
+  const form = new FormData();
+  form.append('audio', blob, 'recording.webm');
+
+  try {
+    const res  = await fetch('/api/voice', {method: 'POST', body: form});
+    const json = await res.json();
+
+    if (res.ok && json.word) {
+      _showVoiceResult(json.word);
+    } else {
+      _setVoiceStatus('error', 'Error: ' + (json.error || 'unknown'));
+    }
+  } catch (err) {
+    _setVoiceStatus('error', 'Network error: ' + err.message);
+  }
+}
+
+function _showVoiceResult(word) {
+  setText('voiceResultWord', word);
+  _setVoiceStatus('done', 'Sent: ' + word);
+
+  // History
+  const list = document.getElementById('voiceHistoryList');
+  if (list) {
+    list.querySelector('.dim')?.remove();
+    const li = document.createElement('li');
+    li.className   = 'history-item';
+    li.textContent = word + '  ' + new Date().toLocaleTimeString();
+    list.insertBefore(li, list.firstChild);
+    while (list.children.length > MAX_HISTORY) list.removeChild(list.lastChild);
+  }
+
+  setTimeout(() => _setVoiceStatus('', 'Ready'), 3000);
+}
+
+function _setVoiceStatus(cls, text) {
+  const el = document.getElementById('voiceStatus');
+  if (!el) return;
+  el.className  = 'voice-status' + (cls ? ' ' + cls : '');
+  el.innerHTML  = text;
 }

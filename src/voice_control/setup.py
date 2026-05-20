@@ -6,7 +6,7 @@ package_name = 'voice_control'
 
 setup(
     name=package_name,
-    version='0.1.0',
+    version='0.2.0',
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -16,12 +16,16 @@ setup(
             glob('launch/*.py')),
         (os.path.join('share', package_name, 'config'),
             glob('config/*')),
+        (os.path.join('share', package_name, 'models'),
+            glob('models/*.npz')),
+        (os.path.join('share', package_name, 'models', 'hmm_models'),
+            glob('models/hmm_models/*.npz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='Jordan',
-    maintainer_email='jordanpalafoxs@gmail.com',
-    description='LPC+VQ voice recognition for AMR voice command interface',
+    maintainer='Puzzlebot Team',
+    maintainer_email='a01198515@tec.mx',
+    description='HMM+MFCC voice recognition for AMR voice command interface',
     license='MIT',
     extras_require={
         'test': ['pytest'],
@@ -29,8 +33,6 @@ setup(
     entry_points={
         'console_scripts': [
             'voice_node = voice_control.voice_node:main',
-            'train = voice_control.train:main',
-            'collect_training_data = voice_control.scripts.collect_training_data:main',
         ],
     },
 )

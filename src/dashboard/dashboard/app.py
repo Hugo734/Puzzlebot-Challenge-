@@ -6,12 +6,14 @@ before starting the Flask/SocketIO server.
 """
 
 import base64
+import io
 import json
 import os
 import threading
 import time
 from typing import Optional
 
+import numpy as np
 from flask import Flask, Response, jsonify, render_template, request
 from flask_socketio import SocketIO
 
@@ -34,6 +36,39 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # Set by dashboard_node before the server starts
 ros_bridge = None  # type: Optional[object]
+
+# ---------------------------------------------------------------------------
+# HMM voice recognizer (lazy-loaded on first /api/voice call)
+# ---------------------------------------------------------------------------
+
+_hmm_recognizer = None
+_hmm_lock = threading.Lock()
+
+
+def _get_hmm_recognizer():
+    global _hmm_recognizer
+    if _hmm_recognizer is not None:
+        return _hmm_recognizer
+    with _hmm_lock:
+        if _hmm_recognizer is not None:
+            return _hmm_recognizer
+        try:
+            from voice_control.hmm_recognizer import HMMRecognizer  # type: ignore[import]
+            r = HMMRecognizer()
+            if r.load():
+                _hmm_recognizer = r
+            else:
+                # Try source tree path as fallback
+                src_models = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    '..', '..', '..', 'voice_control', 'models',
+                )
+                r2 = HMMRecognizer(models_dir=os.path.normpath(src_models))
+                if r2.load():
+                    _hmm_recognizer = r2
+        except Exception:  # noqa: BLE001
+            pass
+    return _hmm_recognizer
 
 # ---------------------------------------------------------------------------
 # Valid location choices for mission form validation
@@ -259,6 +294,103 @@ def send_teleop():
         _teleop_active = True
 
     return jsonify({"ok": True})
+
+
+@app.route("/api/voice", methods=["POST"])
+def voice_command():
+    """
+    Receive an audio blob from the browser, run HMM recognition,
+    publish the result to /voice_command, and return the recognised word.
+
+    The browser should POST multipart/form-data with field 'audio'
+    containing a WebM/OGG audio blob, or raw WAV bytes with
+    Content-Type: audio/wav.
+    """
+    recognizer = _get_hmm_recognizer()
+    if recognizer is None:
+        return jsonify({"error": "HMM models not loaded"}), 503
+
+    # ── Decode incoming audio ──────────────────────────────────────
+    raw = None
+    content_type = request.content_type or ""
+
+    if "multipart/form-data" in content_type:
+        f = request.files.get("audio")
+        if f is None:
+            return jsonify({"error": "No audio field in form"}), 400
+        raw = f.read()
+        fname = f.filename or ""
+    else:
+        raw = request.get_data()
+        fname = ""
+
+    if not raw:
+        return jsonify({"error": "Empty audio data"}), 400
+
+    # ── Convert to float32 numpy array at 16 kHz ──────────────────
+    signal = None
+    fs_in  = 16000
+
+    # Try WAV first (scipy — no extra deps)
+    try:
+        import scipy.io.wavfile as wav_io
+        fs_in, data = wav_io.read(io.BytesIO(raw))
+        data = data.astype(np.float32)
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        if data.max() > 1.5:
+            data /= 32768.0
+        signal = data
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Fallback: pydub (handles webm, ogg, mp3…)
+    if signal is None:
+        try:
+            from pydub import AudioSegment
+            seg = (
+                AudioSegment.from_file(io.BytesIO(raw))
+                .set_channels(1)
+                .set_frame_rate(16000)
+            )
+            arr = np.array(seg.get_array_of_samples(), dtype=np.float32)
+            arr /= 2 ** (seg.sample_width * 8 - 1)
+            signal = arr
+            fs_in  = 16000
+        except Exception:  # noqa: BLE001
+            return jsonify({"error": "Could not decode audio (WAV or WebM/pydub required)"}), 400
+
+    # Resample if needed
+    if fs_in != 16000:
+        import scipy.signal as sp_signal
+        signal = sp_signal.resample(signal, int(len(signal) * 16000 / fs_in)).astype(np.float32)
+
+    if len(signal) < 800:
+        return jsonify({"error": "Audio too short"}), 400
+
+    # ── Recognise ─────────────────────────────────────────────────
+    word = recognizer.recognize(signal, fs=16000)
+    if word is None:
+        return jsonify({"error": "Recognition failed"}), 500
+
+    # ── Publish to ROS2 ───────────────────────────────────────────
+    if ros_bridge is not None:
+        try:
+            ros_bridge.publish_voice_command(word)
+        except Exception:  # noqa: BLE001
+            pass
+
+    socketio.emit("voice_result", {"word": word})
+    return jsonify({"word": word})
+
+
+@app.route("/api/voice/status")
+def voice_status():
+    """Return whether the HMM recognizer is loaded and which words it knows."""
+    r = _get_hmm_recognizer()
+    if r is None:
+        return jsonify({"ready": False, "vocabulary": []})
+    return jsonify({"ready": True, "vocabulary": r.vocabulary})
 
 
 @app.route("/api/teleop/stop", methods=["POST"])

@@ -89,6 +89,7 @@
         <button class="tab-btn" data-tab="mission">MISSION</button>
         <button class="tab-btn" data-tab="teleop">TELEOP</button>
         <button class="tab-btn" data-tab="camera">CAM</button>
+        <button class="tab-btn" data-tab="voice">VOICE</button>
       </div>
 
       <!-- ---- TAB: NAVIGATE ---- -->
@@ -290,6 +291,47 @@
         </section>
 
       </div><!-- /tab-camera -->
+
+      <!-- ---- TAB: VOICE ---- -->
+      <div class="tab-pane hidden" id="tab-voice">
+
+        <section class="card">
+          <h2 class="card-title">Voice Commands</h2>
+
+          <div class="voice-btn-row">
+            <button class="btn-voice-record" id="btnVoiceRecord" type="button">
+              &#9679; Hold to Record
+            </button>
+          </div>
+
+          <div class="voice-status-row">
+            <span class="tele-label">Status</span>
+            <span class="voice-status" id="voiceStatus">Ready</span>
+          </div>
+
+          <div class="voice-result-box" id="voiceResultBox">
+            <span class="voice-result-label">Last word:</span>
+            <span class="voice-result-word mono accent" id="voiceResultWord">—</span>
+          </div>
+
+          <p class="teleop-hint" id="voiceModelStatus">Checking models…</p>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Voice History</h2>
+          <ul class="history-list" id="voiceHistoryList">
+            <li class="dim">No commands yet</li>
+          </ul>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Vocabulary</h2>
+          <div class="voice-vocab" id="voiceVocab">
+            <span class="dim">Loading…</span>
+          </div>
+        </section>
+
+      </div><!-- /tab-voice -->
 
     </aside>
   </main>
