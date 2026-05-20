@@ -6,10 +6,10 @@
   <xacro:arg name="is_sim" default="true"/>
 
   <!-- Include Gazebo plugins -->
-  <xacro:include filename="$(find puzzlebot_description)/urdf/puzzlebot_gazebo.xacro" />
+  <xacro:include filename="$(find description)/urdf/puzzlebot_gazebo.xacro" />
 
   <!-- Include ros2_control -->
-  <xacro:include filename="$(find puzzlebot_description)/urdf/puzzlebot_ros2_control.xacro" />
+  <xacro:include filename="$(find description)/urdf/puzzlebot_ros2_control.xacro" />
 
   <!-- ==================== PROPERTIES ==================== -->
   <xacro:property name="wheel_radius" value="0.05"/>
@@ -61,7 +61,7 @@
     <visual>
       <origin xyz="0.050 0 0.0965" rpy="1.5708 0 3.1416"/>
       <geometry>
-        <mesh filename="package://puzzlebot_description/meshes/MCR2_puzzlebot_jetson_lidar_base.stl"/>
+        <mesh filename="package://description/meshes/MCR2_puzzlebot_jetson_lidar_base.stl"/>
       </geometry>
       <material name="dark_grey">
         <color rgba="0.3 0.3 0.3 1.0"/>
@@ -80,7 +80,7 @@
     <visual>
       <origin xyz="0.055 -0.0048 0" rpy="1.57 0 0"/>
       <geometry>
-        <mesh filename="package://puzzlebot_description/meshes/MCR2_wheel.stl"/>
+        <mesh filename="package://description/meshes/MCR2_wheel.stl"/>
       </geometry>
       <material name="grey">
         <color rgba="0.5 0.5 0.5 1.0"/>
@@ -100,7 +100,7 @@
     <visual>
       <origin xyz="0.055 0.0048 0" rpy="-1.57 0 0"/>
       <geometry>
-        <mesh filename="package://puzzlebot_description/meshes/MCR2_wheel.stl"/>
+        <mesh filename="package://description/meshes/MCR2_wheel.stl"/>
       </geometry>
       <material name="grey">
         <color rgba="0.5 0.5 0.5 1.0"/>
@@ -120,7 +120,7 @@
     <visual>
       <origin xyz="0 0 -0.015" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="package://puzzlebot_description/meshes/MCR2_caster_wheel.stl"/>
+        <mesh filename="package://description/meshes/MCR2_caster_wheel.stl"/>
       </geometry>
       <material name="grey">
         <color rgba="0.5 0.5 0.5 1.0"/>

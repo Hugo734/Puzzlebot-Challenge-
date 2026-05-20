@@ -140,6 +140,11 @@ class SLAMNode(Node):
         self._pose_pub = self.create_publisher(PoseStamped, '/slam_pose', 10)
         self._tf_br    = TransformBroadcaster(self)
 
+        # Publish map→odom at 10 Hz from the very start so RViz can display
+        # the robot model before the first scan is processed.  The scan
+        # callback keeps updating the same transform once data arrives.
+        self.create_timer(0.1, self._tf_timer_cb)
+
         self.create_subscription(Odometry, '/odom',
                                  self._odom_callback, 10)
         self.create_subscription(LaserScan, '/scan',
@@ -148,6 +153,13 @@ class SLAMNode(Node):
         self.get_logger().info(
             f'SLAM node started — {w}x{h} cells @ {res} m/cell '
             f'({w*res:.1f} x {h*res:.1f} m)')
+
+    # ── Startup TF heartbeat ───────────────────────────────────────────
+
+    def _tf_timer_cb(self):
+        """Publish map→odom at 10 Hz regardless of scan state."""
+        now = self.get_clock().now().to_msg()
+        self._publish_tf(now)
 
     # ── Odometry callback ──────────────────────────────────────────────
 

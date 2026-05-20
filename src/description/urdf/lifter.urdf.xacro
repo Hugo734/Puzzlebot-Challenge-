@@ -21,14 +21,13 @@
   <link name="world"/>
 
   <!-- Outer mast / fork base (4-mast-1.stl) ─ fixed reference
-       STL lies flat (long axis in mesh-Y=170mm).  rpy="1.5708 0 0" rotates
-       mesh-Y → world-Z so the mast stands upright (170mm tall).
-       xyz centres the mesh on the link origin (computed from bounding box). -->
+       rpy="1.5708 3.14159 0" = Rx(90°) then Ry(180°): stands upright and
+       flipped 180° on Y. xyz re-centred for the flipped orientation. -->
   <link name="lifter_base_link">
     <visual>
-      <origin xyz="-0.1125 0.0112 -0.1125" rpy="1.5708 0 0"/>
+      <origin xyz="-0.1125 -0.0112 0.1125" rpy="1.5708 3.14159 3.14159"/>
       <geometry>
-        <mesh filename="package://puzzlebot_description/meshes/4-mast-1.stl"
+        <mesh filename="package://puzzlebot_description/meshes/lifter/outer_mast.stl"
               scale="${s} ${s} ${s}"/>
       </geometry>
       <material name="off_white">
@@ -42,14 +41,14 @@
     </inertial>
   </link>
 
-  <!-- Inner mast (7-mast-2.stl) ─ slides vertically inside outer mast
-       Same rotation: long axis (155mm) becomes Z.  Narrower than outer mast
-       so it nests cleanly inside (49mm < 55mm wide, 11.6mm < 22.4mm deep). -->
+  <!-- Inner mast (Frantic Albar-Hillar (9).stl) ─ slides vertically inside outer mast
+       Long axis (171mm) in mesh-Y → world-Z via rpy="1.5708 0 0".
+       xyz centres the mesh on the link origin (bounding box: X:41-90, Y:-65.5..105.5, Z:0-11.6). -->
   <link name="mast_inner_link">
     <visual>
-      <origin xyz="-0.1125 0.0058 -0.1125" rpy="1.5708 0 0"/>
+      <origin xyz="-0.0655 0.0058 -0.0050" rpy="1.5708 0 0"/>
       <geometry>
-        <mesh filename="package://puzzlebot_description/meshes/7-mast-2.stl"
+        <mesh filename="package://puzzlebot_description/meshes/lifter/mast_inner.stl"
               scale="${s} ${s} ${s}"/>
       </geometry>
       <material name="off_white">
@@ -71,7 +70,7 @@
     <visual>
       <origin xyz="-0.1125 -0.11343 -0.02793" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="package://puzzlebot_description/meshes/8-carriage.stl"
+        <mesh filename="package://puzzlebot_description/meshes/lifter/carriage.stl"
               scale="${s} ${s} ${s}"/>
       </geometry>
       <material name="light_grey">
@@ -82,6 +81,44 @@
       <mass value="0.2"/>
       <inertia ixx="0.001" ixy="0" ixz="0"
                iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- Camera pan holder (camera_holder.stl) — upright bracket, rotates on mast
+       Bottom of bracket (mesh-Y=59mm) sits at z=0 (= inner mast top / joint origin).
+       Top at z=0.0225m. Camera mounts above. -->
+  <link name="cam_holder_link">
+    <visual>
+      <origin xyz="0.0285 -0.0055 0.0715" rpy="-1.5708 0 0"/>
+      <geometry>
+        <mesh filename="package://puzzlebot_description/meshes/lifter/camera_holder.stl"
+              scale="${s} ${s} ${s}"/>
+      </geometry>
+      <material name="light_grey">
+        <color rgba="0.80 0.80 0.75 1.0"/>
+      </material>
+    </visual>
+    <inertial>
+      <mass value="0.01"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+
+  <!-- Mast camera (camera.stl) — fixed to pan holder, rotates with it -->
+  <link name="mast_camera_link">
+    <visual>
+      <origin xyz="-0.0005 0.0290 0.0005" rpy="-1.5708 0 3.14159"/>
+      <geometry>
+        <mesh filename="package://puzzlebot_description/meshes/lifter/camera.stl"
+              scale="${s} ${s} ${s}"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.1 0.1 0.1 1.0"/>
+      </material>
+    </visual>
+    <inertial>
+      <mass value="0.01"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
     </inertial>
   </link>
 
@@ -120,12 +157,30 @@
     <limit lower="0.0" upper="0.10" effort="50.0" velocity="0.10"/>
   </joint>
 
+  <!-- Pan holder: revolute X at top of inner mast (z=0.085 ≈ mast top at 85.5mm) -->
+  <joint name="cam_holder_joint" type="fixed">
+    <parent link="mast_inner_link"/>
+    <child  link="cam_holder_link"/>
+    <origin xyz="0 0 0.105" rpy="0.7854 0 0"/>
+  </joint>
+
+  <!-- Camera: fixed to pan holder, sits on top of bracket
+       z=0.030: bracket top (0.0225) + half camera height (0.007) = 0.0295 ≈ 0.030m -->
+  <joint name="mast_camera_joint" type="fixed">
+    <parent link="cam_holder_link"/>
+    <child  link="mast_camera_link"/>
+    <origin xyz="0 0 0.033" rpy="0 0 0"/>
+  </joint>
+
   <!-- ═══════════════════════ MATERIALS ═══════════════════════ -->
   <material name="off_white">
     <color rgba="0.93 0.93 0.87 1.0"/>
   </material>
   <material name="light_grey">
     <color rgba="0.80 0.80 0.75 1.0"/>
+  </material>
+  <material name="black">
+    <color rgba="0.1 0.1 0.1 1.0"/>
   </material>
 
 </robot>
