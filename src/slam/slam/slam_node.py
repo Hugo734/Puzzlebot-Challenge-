@@ -5,7 +5,14 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+
+_qos_scan = QoSProfile(
+    reliability=ReliabilityPolicy.RELIABLE,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=5,
+    durability=DurabilityPolicy.VOLATILE,
+)
 
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry, OccupancyGrid as OccupancyGridMsg
@@ -148,7 +155,7 @@ class SLAMNode(Node):
         self.create_subscription(Odometry, '/odom',
                                  self._odom_callback, 10)
         self.create_subscription(LaserScan, '/scan',
-                                 self._scan_callback, qos_profile_sensor_data)
+                                 self._scan_callback, _qos_scan)
 
         self.get_logger().info(
             f'SLAM node started — {w}x{h} cells @ {res} m/cell '

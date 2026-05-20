@@ -1,30 +1,33 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32.hpp>
+#include <rmw/types.h>
 
 using std::placeholders::_1;
 
 // Bridges real Jetson encoder topics to the standard /wr, /wl interface.
-//   /VelocityEncl  -> /wl   (left wheel,  rad/s)
-//   /VelocityEncnR -> /wr   (right wheel, rad/s)
+//   /VelocityEncL -> /wl   (left wheel,  rad/s)
+//   /VelocityEncR -> /wr   (right wheel, rad/s)
 class VelocityBridgeNode : public rclcpp::Node
 {
 public:
   VelocityBridgeNode()
   : Node("velocity_bridge")
   {
+    auto qos = rclcpp::QoS(10).best_effort();
+
     wr_pub_ = create_publisher<std_msgs::msg::Float32>("/wr", 10);
     wl_pub_ = create_publisher<std_msgs::msg::Float32>("/wl", 10);
 
     left_sub_ = create_subscription<std_msgs::msg::Float32>(
-      "/VelocityEncl", 10,
+      "/VelocityEncL", qos,
       [this](const std_msgs::msg::Float32::SharedPtr msg) { wl_pub_->publish(*msg); });
 
     right_sub_ = create_subscription<std_msgs::msg::Float32>(
-      "/VelocityEncnR", 10,
+      "/VelocityEncR", qos,
       [this](const std_msgs::msg::Float32::SharedPtr msg) { wr_pub_->publish(*msg); });
 
     RCLCPP_INFO(get_logger(),
-      "Velocity Bridge started — /VelocityEncl -> /wl | /VelocityEncnR -> /wr");
+      "Velocity Bridge started — /VelocityEncL -> /wl | /VelocityEncR -> /wr");
   }
 
 private:

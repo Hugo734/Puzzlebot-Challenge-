@@ -173,8 +173,8 @@ Visualization Manager:
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
-        Reliability Policy: Best Effort
-        Value: /scan
+        Reliability Policy: Reliable
+        Value: /scan_fixed
       Use Fixed Frame: true
       Use rainbow: true
       Value: true

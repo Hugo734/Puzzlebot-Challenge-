@@ -111,6 +111,15 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Re-stamps /scan with local clock so TF lookups work despite robot/PC
+    # clock offset (~200-400 ms from SSH latency).
+    scan_fix = Node(
+        package='slam',
+        executable='scan_timestamp_fix',
+        name='scan_timestamp_fix',
+        output='screen',
+    )
+
     slam_node = Node(
         package='slam',
         executable='slam_node',
@@ -119,7 +128,10 @@ def generate_launch_description():
             slam_params,
             {'use_sim_time': False},
         ],
-        remappings=[('/odom', '/puzzlebot_controller/odom')],
+        remappings=[
+            ('/odom', '/puzzlebot_controller/odom'),
+            ('/scan', '/scan_fixed'),
+        ],
         output='screen',
     )
 
@@ -162,6 +174,7 @@ def generate_launch_description():
         real_odom,
         lidar_frame_laser,
         lidar_frame_laser_link,
+        scan_fix,
         slam_node,
         map_saver,
         rviz,
