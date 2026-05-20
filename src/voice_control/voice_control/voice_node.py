@@ -16,6 +16,8 @@ Subscriptions (mock_mode only)
 Parameters
 ----------
 See config/voice_params.yaml for the full list.
+
+Voice command py
 """
 
 from __future__ import annotations
@@ -92,7 +94,7 @@ class VoiceNode(Node):
             f'models_dir={models_dir}'
         )
 
-    # ── Mock mode ─────────────────────────────────────────────────────
+    # ── Mock mode ───────────────────────────────
 
     def _setup_mock_mode(self) -> None:
         self._mock_sub = self.create_subscription(
