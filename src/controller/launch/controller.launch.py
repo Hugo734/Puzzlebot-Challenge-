@@ -35,6 +35,16 @@ def generate_launch_description():
         ],
     )
 
+    lifter_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "lifter_controller",
+            "--controller-manager",
+            "/controller_manager",
+        ],
+    )
+
     # Standard diff_drive_controller (when not using simple controller)
     wheel_controller_spawner = Node(
         package="controller_manager",
@@ -86,6 +96,7 @@ def generate_launch_description():
         wheel_radius_arg,
         wheel_separation_arg,
         joint_state_broadcaster_spawner,
+        lifter_controller_spawner,
         wheel_controller_spawner,
         simple_controller_group,
         twist_relay_node,
