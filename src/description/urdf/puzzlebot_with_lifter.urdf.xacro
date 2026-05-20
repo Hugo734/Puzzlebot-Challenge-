@@ -18,6 +18,11 @@
   <xacro:property name="wheel_mass" value="0.1"/>
   <xacro:property name="caster_mass" value="0.01"/>
 
+  <!-- Real RPLidar A1 is mounted 180° rotated (motor/cable at front).
+       Simulation emits rays from +X so no correction is needed there. -->
+  <xacro:property name="lidar_yaw"
+    value="${0.0 if '$(arg is_sim)' == 'true' else 3.141592653589793}"/>
+
   <!-- mm → m for lifter STL meshes -->
   <xacro:property name="s" value="0.001"/>
 
@@ -337,7 +342,7 @@
   <joint name="lidar_joint" type="fixed">
     <parent link="base_link"/>
     <child  link="lidar_link"/>
-    <origin xyz="0.04 0.0 0.12" rpy="0.0 0.0 0.0"/>
+    <origin xyz="0.04 0.0 0.12" rpy="0.0 0.0 ${lidar_yaw}"/>
   </joint>
 
   <joint name="camera_joint" type="fixed">
