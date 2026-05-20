@@ -19,7 +19,7 @@ config/slam_params.yaml.
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -164,7 +164,19 @@ def generate_launch_description():
         remappings=[('cmd_vel', '/cmd_vel')],
     )
 
+    # Force default FastDDS for every child process.  An older config
+    # exported FASTRTPS_DEFAULT_PROFILES_FILE=fastdds_localhost.xml in
+    # ~/.bashrc; that profile disables UDP multicast and prevents the
+    # local stack from discovering the robot's /scan and encoders.  We
+    # removed the export from .bashrc, but the variable can linger in
+    # any shell launched before the change.  Setting it to empty here
+    # makes FastDDS ignore it for every node spawned by this launch,
+    # regardless of the parent shell's environment.
+    clear_fastrtps_profile = SetEnvironmentVariable(
+        name='FASTRTPS_DEFAULT_PROFILES_FILE', value='')
+
     return LaunchDescription([
+        clear_fastrtps_profile,
         map_path_arg,
         wheel_radius_arg,
         wheel_separation_arg,

@@ -180,13 +180,40 @@ def video_feed():
     )
 
 
-@app.route("/api/waypoints")
+@app.route("/api/waypoints", methods=["GET"])
 def get_waypoints():
-    """Return list of waypoint names."""
+    """Return waypoints with full position data {name: {x, y, theta}}."""
     if ros_bridge is None:
-        return jsonify({"waypoints": []})
+        return jsonify({"waypoints": {}})
     wps = ros_bridge.get_waypoints()
-    return jsonify({"waypoints": sorted(wps.keys())})
+    result = {}
+    for name, data in wps.items():
+        if isinstance(data, dict):
+            result[name] = {
+                "x": float(data.get("x", 0.0)),
+                "y": float(data.get("y", 0.0)),
+                "theta": float(data.get("theta", 0.0)),
+            }
+    return jsonify({"waypoints": result})
+
+
+@app.route("/api/waypoints", methods=["POST"])
+def add_waypoint():
+    """Add or update a waypoint and persist to YAML."""
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    try:
+        x = float(body.get("x", 0.0))
+        y = float(body.get("y", 0.0))
+        theta = float(body.get("theta", 0.0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "x, y, theta must be numbers"}), 400
+    ros_bridge.add_waypoint(name, x, y, theta)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/goal", methods=["POST"])

@@ -167,6 +167,20 @@ class RosBridge:
         """Return the waypoints dict {name: {x, y, theta}}."""
         return dict(self._waypoints)
 
+    def add_waypoint(self, name: str, x: float, y: float, theta: float) -> None:
+        """Add or update a waypoint and persist to the YAML file."""
+        import yaml
+        with self._lock:
+            self._waypoints[name] = {"x": x, "y": y, "theta": theta}
+            snapshot = dict(self._waypoints)
+        waypoints_path = os.path.expanduser("~/ros2_maps/waypoints.yaml")
+        try:
+            os.makedirs(os.path.dirname(waypoints_path), exist_ok=True)
+            with open(waypoints_path, "w") as f:
+                yaml.dump({"waypoints": snapshot}, f, default_flow_style=False)
+        except Exception as exc:  # noqa: BLE001
+            self._node.get_logger().warning(f"Could not save waypoints: {exc}")
+
     # ------------------------------------------------------------------
     # ROS2 callbacks (executor thread)
     # ------------------------------------------------------------------

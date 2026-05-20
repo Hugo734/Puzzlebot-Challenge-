@@ -9,9 +9,6 @@
 </head>
 <body>
 
-  <!-- ================================================================
-       HEADER
-       ================================================================ -->
   <header class="header">
     <div class="header-brand">
       <span class="header-icon">&#9651;</span>
@@ -26,146 +23,146 @@
     </div>
   </header>
 
-  <!-- ================================================================
-       MAIN GRID
-       ================================================================ -->
   <main class="grid">
 
-    <!-- ============================================================
-         LEFT PANEL — Telemetry
-         ============================================================ -->
-    <aside class="panel panel-left">
+    <!-- ================================================================
+         MAP PANEL — fills all remaining space
+         ================================================================ -->
+    <section class="panel-map">
+      <div class="map-container" id="mapContainer">
 
-      <!-- Robot State -->
+        <!-- Single canvas: map bg + all overlays -->
+        <canvas id="mapCanvas" class="map-canvas"></canvas>
+
+        <!-- Toolbar overlay (top-left) -->
+        <div class="map-toolbar">
+          <button class="map-btn" id="btnEditWaypoints" title="Toggle waypoint placement mode">
+            &#9998; Edit Waypoints
+          </button>
+          <span class="map-edit-hint hidden" id="editHint">
+            Click on map to place &nbsp;·&nbsp; ESC to cancel
+          </span>
+        </div>
+
+        <!-- Legend overlay (bottom-left) -->
+        <div class="map-legend">
+          <div class="legend-item">
+            <span class="legend-dot" style="background:#00ff88;box-shadow:0 0 4px #00ff88"></span>Robot
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background:#ff6600"></span>Path
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background:rgba(255,60,60,0.9)"></span>LiDAR
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background:#ffd166"></span>Truck
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background:#00c8ff"></span>Rack
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background:#66ee88"></span>Roller
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ================================================================
+         RIGHT PANEL — controls
+         ================================================================ -->
+    <aside class="panel-right">
+
+      <!-- State + Mission (always visible) -->
       <section class="card">
         <h2 class="card-title">Robot State</h2>
         <div class="state-badge" id="stateBadge">UNKNOWN</div>
-      </section>
-
-      <!-- Mission Info -->
-      <section class="card">
-        <h2 class="card-title">Current Mission</h2>
-        <div id="missionBox" class="mission-box">
+        <div id="missionBox" class="mission-box" style="margin-top:10px">
           <p class="dim">No active mission</p>
         </div>
       </section>
 
-      <!-- Pose -->
-      <section class="card">
-        <h2 class="card-title">Pose</h2>
-        <div class="tele-grid">
-          <span class="tele-label">X</span>
-          <span class="tele-val mono" id="poseX">0.000 m</span>
-          <span class="tele-label">Y</span>
-          <span class="tele-val mono" id="poseY">0.000 m</span>
-          <span class="tele-label">&theta;</span>
-          <span class="tele-val mono" id="poseTheta">0.0000 rad</span>
-        </div>
-      </section>
-
-      <!-- Velocity -->
-      <section class="card">
-        <h2 class="card-title">Velocity</h2>
-        <div class="vel-row">
-          <span class="tele-label">Linear</span>
-          <div class="vel-bar-wrap">
-            <div class="vel-bar vel-bar-linear" id="barLinear"></div>
-          </div>
-          <span class="tele-val mono" id="velLinear">0.000 m/s</span>
-        </div>
-        <div class="vel-row">
-          <span class="tele-label">Angular</span>
-          <div class="vel-bar-wrap">
-            <div class="vel-bar vel-bar-angular" id="barAngular"></div>
-          </div>
-          <span class="tele-val mono" id="velAngular">0.000 rad/s</span>
-        </div>
-      </section>
-
-      <!-- Lifter -->
-      <section class="card">
-        <h2 class="card-title">Lifter Level</h2>
-        <div class="lifter-wrap">
-          <div class="lifter-column" id="lifterColumn">
-            <!-- 8 segments rendered from JS (7 down to 0) -->
-          </div>
-          <div class="lifter-labels">
-            <span>7</span><span>6</span><span>5</span><span>4</span>
-            <span>3</span><span>2</span><span>1</span><span>0</span>
-          </div>
-        </div>
-        <p class="lifter-text">Level: <span class="mono accent" id="lifterText">0</span></p>
-      </section>
-
-    </aside>
-
-    <!-- ============================================================
-         CENTER PANEL — Camera + Map
-         ============================================================ -->
-    <section class="panel panel-center">
-
-      <section class="card feed-card">
-        <h2 class="card-title">Live Camera Feed</h2>
-        <div class="feed-wrap">
-          <img
-            id="cameraFeed"
-            class="feed-img"
-            src="/video_feed"
-            alt="Live camera feed"
-            onerror="this.src='/video_feed'"
-          />
-        </div>
-      </section>
-
-      <section class="card feed-card">
-        <h2 class="card-title">Occupancy Map</h2>
-        <div class="feed-wrap map-wrap">
-          <img
-            id="mapImg"
-            class="feed-img map-img"
-            src="/api/map"
-            alt="Occupancy grid map"
-          />
-          <div id="mapNoData" class="map-no-data">
-            Waiting for map data…
-          </div>
-          <!-- Robot pose indicator overlay -->
-          <canvas id="mapOverlay" class="map-overlay"></canvas>
-        </div>
-      </section>
-
-    </section>
-
-    <!-- ============================================================
-         RIGHT PANEL — Tabbed: Mission / Navigate / Teleop
-         ============================================================ -->
-    <aside class="panel panel-right">
-
-      <!-- Tab Bar -->
+      <!-- Tab bar -->
       <div class="tab-bar">
-        <button class="tab-btn active" data-tab="mission">MISSION</button>
-        <button class="tab-btn" data-tab="navigate">NAVIGATE</button>
+        <button class="tab-btn active" data-tab="navigate">NAV</button>
+        <button class="tab-btn" data-tab="mission">MISSION</button>
         <button class="tab-btn" data-tab="teleop">TELEOP</button>
+        <button class="tab-btn" data-tab="camera">CAM</button>
       </div>
 
+      <!-- ---- TAB: NAVIGATE ---- -->
+      <div class="tab-pane" id="tab-navigate">
+
+        <section class="card">
+          <h2 class="card-title">Navigation Control</h2>
+          <div class="nav-form">
+            <label class="form-label" for="waypointSelect">Waypoint</label>
+            <select id="waypointSelect" class="form-select">
+              <option value="">— loading… —</option>
+            </select>
+            <div style="display:flex;gap:6px">
+              <button class="btn-submit" id="btnGoWaypoint" type="button" style="flex:1">&#9654; Go</button>
+              <button class="btn-cancel" id="btnCancelNav" type="button" style="flex:1">&#9632; Cancel</button>
+            </div>
+          </div>
+          <div class="nav-status-box">
+            <span class="tele-label">Status:</span>
+            <span class="nav-status-badge" id="navStatusBadge">UNKNOWN</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Pose</h2>
+          <div class="tele-grid">
+            <span class="tele-label">X</span>
+            <span class="tele-val mono" id="poseX">0.000 m</span>
+            <span class="tele-label">Y</span>
+            <span class="tele-val mono" id="poseY">0.000 m</span>
+            <span class="tele-label">&theta;</span>
+            <span class="tele-val mono" id="poseTheta">0.0000 rad</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Velocity</h2>
+          <div class="vel-row">
+            <span class="tele-label">Linear</span>
+            <div class="vel-bar-wrap"><div class="vel-bar vel-bar-linear" id="barLinear"></div></div>
+            <span class="tele-val mono" id="velLinear">0.000 m/s</span>
+          </div>
+          <div class="vel-row">
+            <span class="tele-label">Angular</span>
+            <div class="vel-bar-wrap"><div class="vel-bar vel-bar-angular" id="barAngular"></div></div>
+            <span class="tele-val mono" id="velAngular">0.000 rad/s</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Lifter Level</h2>
+          <div class="lifter-wrap">
+            <div class="lifter-column" id="lifterColumn"></div>
+            <div class="lifter-labels">
+              <span>7</span><span>6</span><span>5</span><span>4</span>
+              <span>3</span><span>2</span><span>1</span><span>0</span>
+            </div>
+          </div>
+          <p class="lifter-text">Level: <span class="mono accent" id="lifterText">0</span></p>
+        </section>
+
+      </div><!-- /tab-navigate -->
+
       <!-- ---- TAB: MISSION ---- -->
-      <div class="tab-pane" id="tab-mission">
+      <div class="tab-pane hidden" id="tab-mission">
 
         <section class="card">
           <h2 class="card-title">Send Mission</h2>
-
           <form id="missionForm" class="mission-form" autocomplete="off">
 
             <label class="form-label" for="palletId">Pallet ID</label>
-            <input
-              id="palletId"
-              class="form-input"
-              type="text"
-              placeholder="e.g. P001"
-              required
-            />
+            <input id="palletId" class="form-input" type="text" placeholder="e.g. P001" required />
 
-            <label class="form-label" for="sourceSelect">Source Location</label>
+            <label class="form-label" for="sourceSelect">Source</label>
             <select id="sourceSelect" class="form-select" required>
               <option value="">— select source —</option>
               <optgroup label="Trucks">
@@ -183,7 +180,7 @@
               </optgroup>
             </select>
 
-            <label class="form-label" for="sourceLevelSelect">Source Level</label>
+            <label class="form-label" for="sourceLevelSelect">Level</label>
             <select id="sourceLevelSelect" class="form-select" required>
               <option value="">— select level —</option>
               <option value="1">1 — Floor</option>
@@ -209,17 +206,11 @@
               </optgroup>
             </select>
 
-            <button class="btn-submit" type="submit">
-              &#9654; Send Mission
-            </button>
-
+            <button class="btn-submit" type="submit">&#9654; Send Mission</button>
           </form>
-
-          <!-- Toast notification -->
           <div id="toast" class="toast hidden"></div>
         </section>
 
-        <!-- Mission History -->
         <section class="card">
           <h2 class="card-title">Mission History</h2>
           <ul class="history-list" id="historyList">
@@ -227,7 +218,6 @@
           </ul>
         </section>
 
-        <!-- Quick Stats -->
         <section class="card">
           <h2 class="card-title">Session Stats</h2>
           <div class="tele-grid">
@@ -242,40 +232,11 @@
 
       </div><!-- /tab-mission -->
 
-      <!-- ---- TAB: NAVIGATE ---- -->
-      <div class="tab-pane hidden" id="tab-navigate">
-
-        <section class="card">
-          <h2 class="card-title">Navigation Control</h2>
-
-          <div class="nav-form">
-            <label class="form-label" for="waypointSelect">Waypoint</label>
-            <select id="waypointSelect" class="form-select">
-              <option value="">— loading waypoints… —</option>
-            </select>
-            <button class="btn-submit" id="btnGoWaypoint" type="button">
-              &#9654; Go
-            </button>
-            <button class="btn-cancel" id="btnCancelNav" type="button">
-              &#9632; Cancel
-            </button>
-          </div>
-
-          <div class="nav-status-box">
-            <span class="tele-label">Status:</span>
-            <span class="nav-status-badge" id="navStatusBadge">UNKNOWN</span>
-          </div>
-        </section>
-
-      </div><!-- /tab-navigate -->
-
       <!-- ---- TAB: TELEOP ---- -->
       <div class="tab-pane hidden" id="tab-teleop">
 
         <section class="card">
           <h2 class="card-title">Teleop Manual</h2>
-
-          <!-- WASD key grid -->
           <div class="teleop-keys">
             <div class="key-row">
               <div class="key-spacer"></div>
@@ -288,9 +249,7 @@
               <div class="key" id="keyD">D</div>
             </div>
           </div>
-
-          <!-- Velocity bars (bipolar) -->
-          <div style="margin: 10px 0;">
+          <div style="margin:10px 0">
             <div class="vel-row">
               <span class="tele-label">Linear</span>
               <div class="vel-bar-wrap bipolar-wrap">
@@ -308,19 +267,63 @@
               <span class="tele-val mono" id="tVelAngular">0.00</span>
             </div>
           </div>
-
-          <!-- E-stop button -->
-          <button class="btn-estop" id="btnEstop" type="button">
-            &#9632; E-STOP
-          </button>
-
+          <button class="btn-estop" id="btnEstop" type="button">&#9632; E-STOP</button>
           <p class="teleop-hint">WASD / Arrow Keys &nbsp;&middot;&nbsp; Space = E-Stop</p>
         </section>
 
       </div><!-- /tab-teleop -->
 
+      <!-- ---- TAB: CAMERA ---- -->
+      <div class="tab-pane hidden" id="tab-camera">
+
+        <section class="card">
+          <h2 class="card-title">Live Camera Feed</h2>
+          <div class="feed-wrap">
+            <img
+              id="cameraFeed"
+              class="feed-img"
+              src="/video_feed"
+              alt="Live camera feed"
+              onerror="this.src='/video_feed'"
+            />
+          </div>
+        </section>
+
+      </div><!-- /tab-camera -->
+
     </aside>
   </main>
+
+  <!-- ================================================================
+       WAYPOINT PLACEMENT POPUP
+       ================================================================ -->
+  <div id="waypointPopup" class="wp-popup hidden">
+    <div class="wp-popup-box">
+      <h3 class="wp-popup-title">&#9998; Place Waypoint</h3>
+      <p class="wp-popup-coords" id="wpCoords">x: 0.000 m, y: 0.000 m</p>
+
+      <label class="form-label">Name</label>
+      <input id="wpName" class="form-input" type="text" placeholder="e.g. truck_1, rack_2…" autocomplete="off" />
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+        <label class="form-label" style="margin:0">Heading &theta; (rad)</label>
+        <span class="dim" style="font-size:0.75rem" id="wpThetaDeg">0.0°</span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <input id="wpTheta" class="form-range" type="range"
+               min="-3.14159" max="3.14159" step="0.01" value="0" />
+        <span class="mono wp-theta-val" id="wpThetaVal">0.00</span>
+      </div>
+      <button class="btn-cancel btn-use-robot-theta" id="btnUseRobotTheta" type="button">
+        &#8634; Use robot heading
+      </button>
+
+      <div class="wp-popup-actions">
+        <button class="btn-submit" id="btnSaveWaypoint">&#10003; Save</button>
+        <button class="btn-cancel" id="btnCancelWaypoint">&#10007; Cancel</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ================================================================
        FOOTER

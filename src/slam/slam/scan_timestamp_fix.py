@@ -35,10 +35,14 @@ class ScanTimestampFix(Node):
         self.get_logger().info('scan_timestamp_fix ready — /scan → /scan_fixed with local stamp')
 
     def _cb(self, msg: LaserScan):
-        # Stamp 300 ms in the past so the TF buffer always has a valid entry
-        # at the scan's timestamp even when RViz's TF buffer lags by ~140 ms.
+        # Stamp 200 ms in the past.  Needs to exceed the worst-case
+        # gap between consecutive map→odom TF publishes (SLAM's
+        # heartbeat + scan-callback variance), otherwise RViz throws
+        # "extrapolation into the future" and drops the scan.  200 ms
+        # comfortably covers a 30 Hz heartbeat with margin while keeping
+        # the visual lag tolerable during rotation.
         now = self.get_clock().now()
-        msg.header.stamp = (now - Duration(nanoseconds=300_000_000)).to_msg()
+        msg.header.stamp = (now - Duration(nanoseconds=200_000_000)).to_msg()
         self._pub.publish(msg)
 
 

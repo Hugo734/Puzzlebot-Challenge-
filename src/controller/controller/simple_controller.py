@@ -77,13 +77,24 @@ class SimpleController(Node):
         self.wheel_cmd_pub_.publish(wheel_speed_msg)
 
     def jointCallback(self, msg):
+        # Locate wheel joints by name so the index is independent of the
+        # joint_state_broadcaster publication order (lifter joints come first).
+        try:
+            left_idx  = msg.name.index('wheel_left_joint')
+            right_idx = msg.name.index('wheel_right_joint')
+        except ValueError:
+            return  # wheel joints not yet present in this message
+
+        left_pos  = msg.position[left_idx]
+        right_pos = msg.position[right_idx]
+
         # Forward differential kinematics: wheel positions -> odometry
-        dp_left = msg.position[0] - self.left_wheel_prev_pos_
-        dp_right = msg.position[1] - self.right_wheel_prev_pos_
+        dp_left  = left_pos  - self.left_wheel_prev_pos_
+        dp_right = right_pos - self.right_wheel_prev_pos_
         dt = Time.from_msg(msg.header.stamp) - self.prev_time_
 
-        self.left_wheel_prev_pos_ = msg.position[0]
-        self.right_wheel_prev_pos_ = msg.position[1]
+        self.left_wheel_prev_pos_  = left_pos
+        self.right_wheel_prev_pos_ = right_pos
         self.prev_time_ = Time.from_msg(msg.header.stamp)
 
         fi_left = dp_left / (dt.nanoseconds / S_TO_NS)

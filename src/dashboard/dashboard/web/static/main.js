@@ -1,36 +1,20 @@
-/**
- * AMR Warehouse Robot Dashboard — main.js
- *
- * Responsibilities:
- *  - Establish Socket.IO connection with auto-reconnect
- *  - Handle robot_pose, robot_state, telemetry, scan_data, nav_plan events
- *  - Update all UI elements reactively
- *  - Submit mission form via fetch POST /api/mission
- *  - Track session stats (missions sent, uptime, WS events)
- *  - Tab switching (MISSION / NAVIGATE / TELEOP)
- *  - Waypoint navigation control
- *  - WASD teleop with watchdog
- *  - Canvas map overlay (robot arrow + scan dots + path)
- */
-
 'use strict';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const MAX_LINEAR_VEL  = 0.5;   // m/s — for bar scaling
-const MAX_ANGULAR_VEL = 2.0;   // rad/s
+const MAX_LINEAR_VEL  = 0.5;
+const MAX_ANGULAR_VEL = 2.0;
 const MAX_HISTORY     = 20;
 
-const TELEOP_LINEAR  = 0.18;   // m/s
-const TELEOP_ANGULAR = 0.9;    // rad/s
+const TELEOP_LINEAR  = 0.18;
+const TELEOP_ANGULAR = 0.9;
 
-// Map parameters (match warehouse.yaml)
+// Map world-space parameters (must match warehouse config)
 const MAP_ORIGIN_X   = -10.0;  // m
 const MAP_ORIGIN_Y   = -10.0;  // m
 const MAP_RESOLUTION = 0.05;   // m/pixel
-const MAP_SIZE       = 400;    // pixels
 
 // ---------------------------------------------------------------------------
 // Session counters
@@ -41,12 +25,25 @@ let _eventCount   = 0;
 let _startTime    = Date.now();
 
 // ---------------------------------------------------------------------------
-// Map overlay state
+// Map state
 // ---------------------------------------------------------------------------
+
+// Single Image element reused for map updates (avoids object churn)
+const _mapImg = new Image();
+
+// Letterbox rect computed each draw frame: {drawX, drawY, drawW, drawH, mapW, mapH}
+let _mapRender = null;
 
 let _currentPose = {x: 0, y: 0, theta: 0};
 let _currentScan = null;
 let _currentPlan = [];
+
+// Waypoints: {name: {x, y, theta}}
+let _waypoints = {};
+
+// Edit mode
+let _editMode    = false;
+let _pendingWp   = null;  // {x, y} world coords of pending placement
 
 // ---------------------------------------------------------------------------
 // Teleop state
@@ -56,23 +53,18 @@ let _keysDown       = new Set();
 let _teleopInterval = null;
 
 // ---------------------------------------------------------------------------
-// Socket.IO setup
+// Socket.IO
 // ---------------------------------------------------------------------------
 
 const socket = io({
-  reconnection:        true,
+  reconnection: true,
   reconnectionAttempts: Infinity,
-  reconnectionDelay:   1000,
+  reconnectionDelay: 1000,
   reconnectionDelayMax: 10000,
 });
 
-socket.on('connect', () => {
-  setConnectionStatus(true);
-});
-
-socket.on('disconnect', () => {
-  setConnectionStatus(false);
-});
+socket.on('connect',    () => setConnectionStatus(true));
+socket.on('disconnect', () => setConnectionStatus(false));
 
 socket.on('robot_pose', (data) => {
   _eventCount++;
@@ -91,35 +83,21 @@ socket.on('telemetry', (data) => {
   updateTelemetry(data);
 });
 
-socket.on('scan_data', (data) => {
-  _currentScan = data;
-});
+socket.on('scan_data', (data) => { _currentScan = data; });
 
-socket.on('nav_plan', (data) => {
-  _currentPlan = data.points || [];
-});
+socket.on('nav_plan', (data) => { _currentPlan = data.points || []; });
 
 // ---------------------------------------------------------------------------
 // Connection status
 // ---------------------------------------------------------------------------
 
 function setConnectionStatus(connected) {
-  const dot   = document.getElementById('connDot');
-  const label = document.getElementById('connLabel');
-  const fDot  = document.getElementById('footerDot');
-  const fLbl  = document.getElementById('footerLabel');
-
-  if (connected) {
-    dot.className  = 'conn-dot connected';
-    fDot.className = 'conn-dot connected';
-    label.textContent = 'Connected';
-    fLbl.textContent  = 'Connected';
-  } else {
-    dot.className  = 'conn-dot disconnected';
-    fDot.className = 'conn-dot disconnected';
-    label.textContent = 'Disconnected — reconnecting…';
-    fLbl.textContent  = 'Disconnected';
-  }
+  const cls = connected ? 'conn-dot connected' : 'conn-dot disconnected';
+  const lbl = connected ? 'Connected' : 'Disconnected — reconnecting…';
+  document.getElementById('connDot').className   = cls;
+  document.getElementById('footerDot').className = cls;
+  document.getElementById('connLabel').textContent  = lbl;
+  document.getElementById('footerLabel').textContent = connected ? 'Connected' : 'Disconnected';
 }
 
 // ---------------------------------------------------------------------------
@@ -133,97 +111,69 @@ function updatePose(data) {
 }
 
 // ---------------------------------------------------------------------------
-// Robot state + mission update
+// Robot state + mission
 // ---------------------------------------------------------------------------
 
 function updateState(state, mission) {
   const badge = document.getElementById('stateBadge');
   if (!badge) return;
-
   badge.textContent = state || 'UNKNOWN';
-  // Remove all state classes, add current one
-  badge.className = 'state-badge ' + (state || '');
+  badge.className   = 'state-badge ' + (state || '');
 
-  // Mission box
   const box = document.getElementById('missionBox');
   if (!box) return;
-
   if (!mission || typeof mission !== 'object') {
     box.innerHTML = '<p class="dim">No active mission</p>';
     return;
   }
-
-  const rows = [
+  box.innerHTML = [
     ['Pallet', mission.pallet_id || '—'],
     ['Source', formatLocation(mission.source)],
     ['Level',  String(mission.source_level || '—')],
     ['Dest',   formatLocation(mission.destination)],
-  ];
-
-  box.innerHTML = rows.map(([k, v]) =>
-    `<div class="mission-row">
-       <span class="mission-key">${k}</span>
-       <span class="mission-val">${v}</span>
-     </div>`
+  ].map(([k, v]) =>
+    `<div class="mission-row"><span class="mission-key">${k}</span><span class="mission-val">${v}</span></div>`
   ).join('');
 }
 
 // ---------------------------------------------------------------------------
-// Nav status badge update
+// Nav status badge
 // ---------------------------------------------------------------------------
 
 function updateNavStatus(state) {
   const badge = document.getElementById('navStatusBadge');
   if (!badge) return;
   badge.textContent = state || 'UNKNOWN';
-  // Extract base status before colon (e.g. "FOLLOWING:truck_1" → "FOLLOWING")
-  const base = (state || '').split(':')[0];
-  badge.className = 'nav-status-badge ' + base;
+  badge.className   = 'nav-status-badge ' + (state || '').split(':')[0];
 }
 
 // ---------------------------------------------------------------------------
-// Telemetry update
+// Telemetry
 // ---------------------------------------------------------------------------
 
 function updateTelemetry(data) {
-  // Velocities
   const lin = data.linear_vel  ?? 0;
   const ang = data.angular_vel ?? 0;
   setText('velLinear',  `${lin.toFixed(3)} m/s`);
   setText('velAngular', `${ang.toFixed(3)} rad/s`);
+  setStyle('barLinear',  'width', `${Math.min(Math.abs(lin) / MAX_LINEAR_VEL  * 100, 100)}%`);
+  setStyle('barAngular', 'width', `${Math.min(Math.abs(ang) / MAX_ANGULAR_VEL * 100, 100)}%`);
 
-  const linPct = Math.min(Math.abs(lin) / MAX_LINEAR_VEL  * 100, 100);
-  const angPct = Math.min(Math.abs(ang) / MAX_ANGULAR_VEL * 100, 100);
-  setStyle('barLinear',  'width', `${linPct}%`);
-  setStyle('barAngular', 'width', `${angPct}%`);
+  updateLifter(data.lifter_level ?? 0);
 
-  // Lifter
-  const level = data.lifter_level ?? 0;
-  updateLifter(level);
-
-  // Map update via base64 PNG
   if (data.map_png) {
-    const mapImg    = document.getElementById('mapImg');
-    const noDataDiv = document.getElementById('mapNoData');
-    if (mapImg) {
-      mapImg.src = 'data:image/png;base64,' + data.map_png;
-      mapImg.style.display = 'block';
-    }
-    if (noDataDiv) noDataDiv.style.display = 'none';
+    _mapImg.src = 'data:image/png;base64,' + data.map_png;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Lifter indicator
+// Lifter
 // ---------------------------------------------------------------------------
 
-/** Build 8 lifter segments once on load, then toggle .active class. */
 function initLifter() {
   const col = document.getElementById('lifterColumn');
   if (!col) return;
-
   col.innerHTML = '';
-  // Segments drawn top=7 → bottom=0
   for (let i = 7; i >= 0; i--) {
     const seg = document.createElement('div');
     seg.className = 'lifter-segment';
@@ -236,11 +186,7 @@ function updateLifter(level) {
   for (let i = 0; i <= 7; i++) {
     const seg = document.getElementById(`seg${i}`);
     if (!seg) continue;
-    if (i <= level) {
-      seg.classList.add('active');
-    } else {
-      seg.classList.remove('active');
-    }
+    seg.classList.toggle('active', i <= level);
   }
   setText('lifterText', String(level));
 }
@@ -250,37 +196,34 @@ function updateLifter(level) {
 // ---------------------------------------------------------------------------
 
 function initTabs() {
-  const buttons = document.querySelectorAll('.tab-btn');
-  buttons.forEach((btn) => {
+  document.querySelectorAll('.tab-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
-      // Deactivate all tabs
-      buttons.forEach((b) => b.classList.remove('active'));
-      document.querySelectorAll('.tab-pane').forEach((p) => p.classList.add('hidden'));
-
-      // Activate clicked tab
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-pane').forEach(p => p.classList.add('hidden'));
       btn.classList.add('active');
-      const tabName = btn.getAttribute('data-tab');
-      const pane = document.getElementById(`tab-${tabName}`);
+      const pane = document.getElementById(`tab-${btn.dataset.tab}`);
       if (pane) pane.classList.remove('hidden');
     });
   });
 }
 
 // ---------------------------------------------------------------------------
-// Waypoints dropdown
+// Waypoints — load full {name: {x, y, theta}} data
 // ---------------------------------------------------------------------------
 
 async function loadWaypoints() {
   try {
-    const res = await fetch('/api/waypoints');
+    const res  = await fetch('/api/waypoints');
     const data = await res.json();
+    _waypoints = data.waypoints || {};
+
     const select = document.getElementById('waypointSelect');
     if (!select) return;
-
+    const names = Object.keys(_waypoints).sort();
     select.innerHTML = '<option value="">— select waypoint —</option>';
-    (data.waypoints || []).forEach((name) => {
+    names.forEach(name => {
       const opt = document.createElement('option');
-      opt.value = name;
+      opt.value       = name;
       opt.textContent = name;
       select.appendChild(opt);
     });
@@ -293,54 +236,409 @@ async function loadWaypoints() {
 // Navigation control
 // ---------------------------------------------------------------------------
 
-function initNavControls() {
-  const btnGo = document.getElementById('btnGoWaypoint');
-  const btnCancel = document.getElementById('btnCancelNav');
-
-  if (btnGo) {
-    btnGo.addEventListener('click', async () => {
-      const select = document.getElementById('waypointSelect');
-      const waypoint = select ? select.value : '';
-      if (!waypoint) {
-        showToast('Select a waypoint first.', 'error');
-        return;
-      }
-      try {
-        const res = await fetch('/api/goal', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({waypoint}),
-        });
-        const json = await res.json();
-        if (json.ok) {
-          showToast(`Navigating to: ${waypoint}`, 'success');
-        } else {
-          showToast(`Error: ${json.error || 'unknown'}`, 'error');
-        }
-      } catch (err) {
-        showToast(`Network error: ${err.message}`, 'error');
-      }
+async function sendGoalWaypoint(name) {
+  try {
+    const res  = await fetch('/api/goal', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({waypoint: name}),
     });
-  }
-
-  if (btnCancel) {
-    btnCancel.addEventListener('click', async () => {
-      try {
-        await fetch('/api/goal', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({waypoint: ''}),
-        });
-        showToast('Navigation cancelled', 'success');
-      } catch (err) {
-        showToast(`Network error: ${err.message}`, 'error');
-      }
-    });
+    const json = await res.json();
+    if (json.ok) {
+      showToast(name ? `Navigating to: ${name}` : 'Navigation cancelled', 'success');
+    } else {
+      showToast(`Error: ${json.error || 'unknown'}`, 'error');
+    }
+  } catch (err) {
+    showToast(`Network error: ${err.message}`, 'error');
   }
 }
 
+function initNavControls() {
+  const btnGo     = document.getElementById('btnGoWaypoint');
+  const btnCancel = document.getElementById('btnCancelNav');
+
+  btnGo?.addEventListener('click', () => {
+    const sel = document.getElementById('waypointSelect');
+    const wp  = sel ? sel.value : '';
+    if (!wp) { showToast('Select a waypoint first.', 'error'); return; }
+    sendGoalWaypoint(wp);
+  });
+
+  btnCancel?.addEventListener('click', () => sendGoalWaypoint(''));
+}
+
 // ---------------------------------------------------------------------------
-// Teleop — WASD
+// MAP CANVAS — coordinate transforms
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert ROS world coords (m) → canvas pixel coords.
+ * Requires _mapRender to be set by drawMapOverlay.
+ */
+function worldToCanvas(wx, wy) {
+  if (!_mapRender) return [0, 0];
+  const {drawX, drawY, drawW, drawH, mapW, mapH} = _mapRender;
+  const px = (wx - MAP_ORIGIN_X) / MAP_RESOLUTION;
+  const py = mapH - (wy - MAP_ORIGIN_Y) / MAP_RESOLUTION;
+  return [drawX + px * drawW / mapW, drawY + py * drawH / mapH];
+}
+
+/**
+ * Convert canvas pixel coords → ROS world coords (m).
+ */
+function canvasToWorld(cx, cy) {
+  if (!_mapRender) return [0, 0];
+  const {drawX, drawY, drawW, drawH, mapW, mapH} = _mapRender;
+  const px = (cx - drawX) * mapW / drawW;
+  const py = (cy - drawY) * mapH / drawH;
+  return [
+    px * MAP_RESOLUTION + MAP_ORIGIN_X,
+    (mapH - py) * MAP_RESOLUTION + MAP_ORIGIN_Y,
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// MAP CANVAS — main draw loop (10 Hz)
+// ---------------------------------------------------------------------------
+
+function drawMapOverlay() {
+  const canvas = document.getElementById('mapCanvas');
+  if (!canvas) return;
+
+  const container = canvas.parentElement;
+  const cw = container.clientWidth;
+  const ch = container.clientHeight;
+  if (!cw || !ch) return;
+
+  // Update canvas resolution to match CSS display size
+  if (canvas.width !== cw || canvas.height !== ch) {
+    canvas.width  = cw;
+    canvas.height = ch;
+  }
+
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, cw, ch);
+
+  // ---- Draw map image (letterboxed) ----
+  if (_mapImg.complete && _mapImg.naturalWidth > 0) {
+    const iw = _mapImg.naturalWidth;
+    const ih = _mapImg.naturalHeight;
+    const imgRatio = iw / ih;
+    const canRatio = cw / ch;
+
+    let drawW, drawH, drawX, drawY;
+    if (imgRatio >= canRatio) {
+      drawW = cw;
+      drawH = cw / imgRatio;
+      drawX = 0;
+      drawY = (ch - drawH) / 2;
+    } else {
+      drawH = ch;
+      drawW = ch * imgRatio;
+      drawX = (cw - drawW) / 2;
+      drawY = 0;
+    }
+
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(_mapImg, drawX, drawY, drawW, drawH);
+    _mapRender = {drawX, drawY, drawW, drawH, mapW: iw, mapH: ih};
+  } else {
+    _mapRender = null;
+    // Waiting placeholder
+    ctx.fillStyle = '#0a0f1e';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.fillStyle = '#4a5f80';
+    ctx.font = '14px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Waiting for map data…', cw / 2, ch / 2);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    return;
+  }
+
+  // ---- Draw LiDAR scan (red dots) ----
+  if (_currentScan && _currentScan.ranges) {
+    const {ranges, angle_min, angle_increment, range_max} = _currentScan;
+    ctx.fillStyle = 'rgba(255, 55, 55, 0.65)';
+    ranges.forEach((r, i) => {
+      if (r <= 0 || r >= (range_max || 12)) return;
+      const angle = _currentPose.theta + angle_min + i * angle_increment;
+      const [cx2, cy2] = worldToCanvas(
+        _currentPose.x + r * Math.cos(angle),
+        _currentPose.y + r * Math.sin(angle)
+      );
+      ctx.beginPath();
+      ctx.arc(cx2, cy2, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  // ---- Draw navigation path (orange) ----
+  if (_currentPlan && _currentPlan.length > 1) {
+    ctx.beginPath();
+    ctx.strokeStyle = 'rgba(255, 100, 0, 0.85)';
+    ctx.lineWidth   = 2;
+    _currentPlan.forEach((pt, i) => {
+      const [cx2, cy2] = worldToCanvas(pt.x, pt.y);
+      i === 0 ? ctx.moveTo(cx2, cy2) : ctx.lineTo(cx2, cy2);
+    });
+    ctx.stroke();
+
+    ctx.fillStyle = '#ff9900';
+    _currentPlan.forEach((pt) => {
+      const [cx2, cy2] = worldToCanvas(pt.x, pt.y);
+      ctx.beginPath();
+      ctx.arc(cx2, cy2, 3, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  // ---- Draw waypoints ----
+  drawWaypoints(ctx);
+
+  // ---- Draw robot arrow ----
+  const [rx, ry] = worldToCanvas(_currentPose.x, _currentPose.y);
+  ctx.save();
+  ctx.translate(rx, ry);
+  ctx.rotate(-_currentPose.theta);
+  ctx.fillStyle   = '#00ff88';
+  ctx.strokeStyle = '#00aa55';
+  ctx.lineWidth   = 1;
+  ctx.shadowColor = '#00ff88';
+  ctx.shadowBlur  = 8;
+  ctx.beginPath();
+  ctx.moveTo(10, 0);
+  ctx.lineTo(-6, -6);
+  ctx.lineTo(-4, 0);
+  ctx.lineTo(-6, 6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+setInterval(drawMapOverlay, 100);
+
+// ---------------------------------------------------------------------------
+// Waypoint rendering
+// ---------------------------------------------------------------------------
+
+function waypointColor(name) {
+  if (name.startsWith('truck'))  return '#ffd166';
+  if (name.startsWith('rack'))   return '#00c8ff';
+  if (name.startsWith('roller')) return '#66ee88';
+  return '#cc88ff';
+}
+
+function drawWaypoints(ctx) {
+  Object.entries(_waypoints).forEach(([name, wp]) => {
+    const [cx, cy] = worldToCanvas(wp.x, wp.y);
+    const color    = waypointColor(name);
+    const theta    = wp.theta || 0;
+
+    // Direction arrow (in canvas: negate sin due to Y-flip)
+    const dx =  Math.cos(theta);
+    const dy = -Math.sin(theta);
+
+    ctx.save();
+    ctx.shadowColor = color;
+    ctx.shadowBlur  = 6;
+
+    // Circle fill
+    ctx.beginPath();
+    ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+    ctx.fillStyle = color + '28';
+    ctx.fill();
+
+    // Circle stroke
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+
+    // Heading arrow
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + 14 * dx, cy + 14 * dy);
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+
+    // Arrowhead
+    const ax = cx + 14 * dx;
+    const ay = cy + 14 * dy;
+    const headAngle = Math.atan2(dy, dx);
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(ax - 5 * Math.cos(headAngle - 0.5), ay - 5 * Math.sin(headAngle - 0.5));
+    ctx.lineTo(ax - 5 * Math.cos(headAngle + 0.5), ay - 5 * Math.sin(headAngle + 0.5));
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    ctx.restore();
+
+    // Label background
+    ctx.font = 'bold 10px "Courier New", monospace';
+    const tw = ctx.measureText(name).width;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+    ctx.fillRect(cx - tw / 2 - 3, cy - 23, tw + 6, 13);
+
+    // Label text
+    ctx.fillStyle     = color;
+    ctx.textAlign     = 'center';
+    ctx.textBaseline  = 'bottom';
+    ctx.fillText(name, cx, cy - 11);
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'alphabetic';
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Map canvas — click handling
+// ---------------------------------------------------------------------------
+
+function initMapInteraction() {
+  const canvas = document.getElementById('mapCanvas');
+  if (!canvas) return;
+
+  canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width  / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const cx = (e.clientX - rect.left) * scaleX;
+    const cy = (e.clientY - rect.top)  * scaleY;
+
+    if (_editMode) {
+      const [wx, wy] = canvasToWorld(cx, cy);
+      _pendingWp = {x: wx, y: wy};
+      showWaypointPopup(wx, wy);
+    } else {
+      // Click on existing waypoint → navigate
+      for (const [name, wp] of Object.entries(_waypoints)) {
+        const [wpx, wpy] = worldToCanvas(wp.x, wp.y);
+        const dist = Math.hypot(cx - wpx, cy - wpy);
+        if (dist < 14) {
+          sendGoalWaypoint(name);
+          // Sync dropdown
+          const sel = document.getElementById('waypointSelect');
+          if (sel) sel.value = name;
+          return;
+        }
+      }
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Edit mode toggle
+// ---------------------------------------------------------------------------
+
+function initEditMode() {
+  const btn  = document.getElementById('btnEditWaypoints');
+  const hint = document.getElementById('editHint');
+  const canvas = document.getElementById('mapCanvas');
+  if (!btn) return;
+
+  btn.addEventListener('click', () => {
+    _editMode = !_editMode;
+    btn.classList.toggle('active', _editMode);
+    hint.classList.toggle('hidden', !_editMode);
+    if (canvas) canvas.classList.toggle('edit-mode', _editMode);
+  });
+
+  // ESC cancels edit mode
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && _editMode) {
+      _editMode = false;
+      btn.classList.remove('active');
+      hint.classList.add('hidden');
+      if (canvas) canvas.classList.remove('edit-mode');
+      hideWaypointPopup();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Waypoint popup
+// ---------------------------------------------------------------------------
+
+function showWaypointPopup(wx, wy) {
+  setText('wpCoords', `x: ${wx.toFixed(3)} m,  y: ${wy.toFixed(3)} m`);
+
+  const nameIn  = document.getElementById('wpName');
+  const thetaIn = document.getElementById('wpTheta');
+  if (nameIn)  { nameIn.value = ''; }
+  if (thetaIn) {
+    thetaIn.value = '0';
+    updateThetaDisplay(0);
+  }
+
+  document.getElementById('waypointPopup').classList.remove('hidden');
+  setTimeout(() => nameIn && nameIn.focus(), 50);
+}
+
+function hideWaypointPopup() {
+  document.getElementById('waypointPopup').classList.add('hidden');
+  _pendingWp = null;
+}
+
+function updateThetaDisplay(val) {
+  setText('wpThetaVal', parseFloat(val).toFixed(2));
+  setText('wpThetaDeg', `${(parseFloat(val) * 180 / Math.PI).toFixed(1)}°`);
+}
+
+function initWaypointPopup() {
+  const thetaIn = document.getElementById('wpTheta');
+  thetaIn?.addEventListener('input', () => updateThetaDisplay(thetaIn.value));
+
+  document.getElementById('btnUseRobotTheta')?.addEventListener('click', () => {
+    if (thetaIn) {
+      thetaIn.value = _currentPose.theta.toFixed(4);
+      updateThetaDisplay(thetaIn.value);
+    }
+  });
+
+  document.getElementById('btnCancelWaypoint')?.addEventListener('click', hideWaypointPopup);
+
+  document.getElementById('btnSaveWaypoint')?.addEventListener('click', async () => {
+    const name  = (document.getElementById('wpName')?.value || '').trim();
+    const theta = parseFloat(document.getElementById('wpTheta')?.value || '0');
+
+    if (!name) {
+      document.getElementById('wpName')?.focus();
+      return;
+    }
+    if (!_pendingWp) return;
+
+    try {
+      const res = await fetch('/api/waypoints', {
+        method:  'POST',
+        headers: {'Content-Type': 'application/json'},
+        body:    JSON.stringify({name, x: _pendingWp.x, y: _pendingWp.y, theta}),
+      });
+      const json = await res.json();
+      if (json.ok) {
+        hideWaypointPopup();
+        await loadWaypoints();
+        showToast(`Waypoint "${name}" saved`, 'success');
+      } else {
+        showToast(`Error: ${json.error || 'unknown'}`, 'error');
+      }
+    } catch (err) {
+      showToast(`Network error: ${err.message}`, 'error');
+    }
+  });
+
+  // Allow Enter to save in the name field
+  document.getElementById('wpName')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('btnSaveWaypoint')?.click();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Teleop
 // ---------------------------------------------------------------------------
 
 function _isInputFocused() {
@@ -349,24 +647,18 @@ function _isInputFocused() {
 }
 
 function _computeTeleopVelocities() {
-  let linear  = 0;
-  let angular = 0;
-
+  let linear = 0, angular = 0;
   if (_keysDown.has('w') || _keysDown.has('arrowup'))    linear  += TELEOP_LINEAR;
   if (_keysDown.has('s') || _keysDown.has('arrowdown'))  linear  -= TELEOP_LINEAR;
   if (_keysDown.has('a') || _keysDown.has('arrowleft'))  angular += TELEOP_ANGULAR;
   if (_keysDown.has('d') || _keysDown.has('arrowright')) angular -= TELEOP_ANGULAR;
-
   return {linear, angular};
 }
 
 function _startTeleopInterval() {
   if (_teleopInterval !== null) return;
   _teleopInterval = setInterval(async () => {
-    if (_keysDown.size === 0) {
-      _stopTeleopInterval();
-      return;
-    }
+    if (_keysDown.size === 0) { _stopTeleopInterval(); return; }
     const {linear, angular} = _computeTeleopVelocities();
     updateTeleopBars(linear, angular);
     try {
@@ -380,41 +672,23 @@ function _startTeleopInterval() {
 }
 
 function _stopTeleopInterval() {
-  if (_teleopInterval !== null) {
-    clearInterval(_teleopInterval);
-    _teleopInterval = null;
-  }
+  if (_teleopInterval !== null) { clearInterval(_teleopInterval); _teleopInterval = null; }
 }
 
 function _highlightKeys() {
   const map = {w: 'keyW', a: 'keyA', s: 'keyS', d: 'keyD'};
   Object.entries(map).forEach(([k, id]) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    if (_keysDown.has(k)) {
-      el.classList.add('pressed');
-    } else {
-      el.classList.remove('pressed');
-    }
+    document.getElementById(id)?.classList.toggle('pressed', _keysDown.has(k));
   });
 }
 
 function initTeleop() {
   document.addEventListener('keydown', (e) => {
     if (_isInputFocused()) return;
-
     const key = e.key.toLowerCase();
-
-    // E-stop on spacebar
-    if (key === ' ') {
-      e.preventDefault();
-      triggerEstop();
-      return;
-    }
-
-    const validKeys = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']);
-    if (!validKeys.has(key)) return;
-
+    if (key === ' ') { e.preventDefault(); triggerEstop(); return; }
+    const valid = new Set(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright']);
+    if (!valid.has(key)) return;
     e.preventDefault();
     _keysDown.add(key);
     _highlightKeys();
@@ -423,11 +697,8 @@ function initTeleop() {
 
   document.addEventListener('keyup', (e) => {
     if (_isInputFocused()) return;
-
-    const key = e.key.toLowerCase();
-    _keysDown.delete(key);
+    _keysDown.delete(e.key.toLowerCase());
     _highlightKeys();
-
     if (_keysDown.size === 0) {
       _stopTeleopInterval();
       updateTeleopBars(0, 0);
@@ -435,10 +706,7 @@ function initTeleop() {
     }
   });
 
-  const btnEstop = document.getElementById('btnEstop');
-  if (btnEstop) {
-    btnEstop.addEventListener('click', triggerEstop);
-  }
+  document.getElementById('btnEstop')?.addEventListener('click', triggerEstop);
 }
 
 function triggerEstop() {
@@ -449,116 +717,16 @@ function triggerEstop() {
   fetch('/api/teleop/stop', {method: 'POST'}).catch(() => {});
 }
 
-// ---------------------------------------------------------------------------
-// Teleop velocity bars (bipolar)
-// ---------------------------------------------------------------------------
-
 function updateTeleopBars(linear, angular) {
   const linPct = Math.min(Math.abs(linear) / TELEOP_LINEAR * 50, 50);
   const angPct = Math.min(Math.abs(angular) / TELEOP_ANGULAR * 50, 50);
-
-  const tBarL = document.getElementById('tBarLinear');
-  const tBarA = document.getElementById('tBarAngular');
-
-  if (tBarL) {
-    tBarL.style.width = linPct + '%';
-    tBarL.style.left  = linear >= 0 ? '50%' : (50 - linPct) + '%';
-  }
-  if (tBarA) {
-    tBarA.style.width = angPct + '%';
-    tBarA.style.left  = angular >= 0 ? '50%' : (50 - angPct) + '%';
-  }
-
+  const tBarL  = document.getElementById('tBarLinear');
+  const tBarA  = document.getElementById('tBarAngular');
+  if (tBarL) { tBarL.style.width = linPct + '%'; tBarL.style.left = linear  >= 0 ? '50%' : (50 - linPct) + '%'; }
+  if (tBarA) { tBarA.style.width = angPct + '%'; tBarA.style.left = angular >= 0 ? '50%' : (50 - angPct) + '%'; }
   setText('tVelLinear',  linear.toFixed(2));
   setText('tVelAngular', angular.toFixed(2));
 }
-
-// ---------------------------------------------------------------------------
-// Map overlay — canvas drawing
-// ---------------------------------------------------------------------------
-
-function worldToCanvas(wx, wy, canvasW, canvasH) {
-  const px = (wx - MAP_ORIGIN_X) / MAP_RESOLUTION;
-  const py = MAP_SIZE - (wy - MAP_ORIGIN_Y) / MAP_RESOLUTION;
-  return [px * canvasW / MAP_SIZE, py * canvasH / MAP_SIZE];
-}
-
-function drawMapOverlay() {
-  const canvas = document.getElementById('mapOverlay');
-  const mapImg = document.getElementById('mapImg');
-  if (!canvas || !mapImg) return;
-
-  // Resize canvas to match rendered image
-  const rect = mapImg.getBoundingClientRect();
-  canvas.width  = rect.width  || mapImg.offsetWidth;
-  canvas.height = rect.height || mapImg.offsetHeight;
-  if (!canvas.width || !canvas.height) return;
-
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const cw = canvas.width;
-  const ch = canvas.height;
-
-  // Draw path (orange line)
-  if (_currentPlan && _currentPlan.length > 1) {
-    ctx.beginPath();
-    ctx.strokeStyle = '#ff6600';
-    ctx.lineWidth = 2;
-    _currentPlan.forEach((pt, i) => {
-      const [cx, cy] = worldToCanvas(pt.x, pt.y, cw, ch);
-      if (i === 0) ctx.moveTo(cx, cy);
-      else ctx.lineTo(cx, cy);
-    });
-    ctx.stroke();
-    // Draw dots at each waypoint
-    ctx.fillStyle = '#ff9900';
-    _currentPlan.forEach((pt) => {
-      const [cx, cy] = worldToCanvas(pt.x, pt.y, cw, ch);
-      ctx.beginPath();
-      ctx.arc(cx, cy, 3, 0, Math.PI * 2);
-      ctx.fill();
-    });
-  }
-
-  // Draw scan (red dots)
-  if (_currentScan && _currentScan.ranges) {
-    const {ranges, angle_min, angle_increment} = _currentScan;
-    ctx.fillStyle = 'rgba(255, 60, 60, 0.7)';
-    ranges.forEach((r, i) => {
-      if (r >= (_currentScan.range_max || 12)) return;
-      if (r <= 0) return;
-      const angle = _currentPose.theta + angle_min + i * angle_increment;
-      const wx = _currentPose.x + r * Math.cos(angle);
-      const wy = _currentPose.y + r * Math.sin(angle);
-      const [cx, cy] = worldToCanvas(wx, wy, cw, ch);
-      ctx.beginPath();
-      ctx.arc(cx, cy, 1.5, 0, Math.PI * 2);
-      ctx.fill();
-    });
-  }
-
-  // Draw robot (green arrow)
-  const [rx, ry] = worldToCanvas(_currentPose.x, _currentPose.y, cw, ch);
-  ctx.save();
-  ctx.translate(rx, ry);
-  ctx.rotate(-_currentPose.theta);  // canvas Y is inverted
-  ctx.fillStyle = '#00ff88';
-  ctx.strokeStyle = '#00aa55';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(8, 0);
-  ctx.lineTo(-5, -5);
-  ctx.lineTo(-3, 0);
-  ctx.lineTo(-5, 5);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-  ctx.restore();
-}
-
-// Redraw map overlay at 10 Hz
-setInterval(drawMapOverlay, 100);
 
 // ---------------------------------------------------------------------------
 // Mission form
@@ -571,6 +739,12 @@ document.addEventListener('DOMContentLoaded', () => {
   loadWaypoints();
   initNavControls();
   initTeleop();
+  initEditMode();
+  initMapInteraction();
+  initWaypointPopup();
+
+  // Try to preload map immediately
+  _mapImg.src = '/api/map';
 
   const form = document.getElementById('missionForm');
   if (!form) return;
@@ -584,37 +758,32 @@ document.addEventListener('DOMContentLoaded', () => {
     const destination = document.getElementById('destSelect').value;
 
     if (!palletId || !source || !sourceLevel || !destination) {
-      showToast('Please fill in all fields.', 'error');
-      return;
+      showToast('Please fill in all fields.', 'error'); return;
     }
     if (source === destination) {
-      showToast('Source and destination must be different.', 'error');
-      return;
+      showToast('Source and destination must be different.', 'error'); return;
     }
 
     const btn = form.querySelector('.btn-submit');
     btn.disabled = true;
 
     try {
-      const res = await fetch('/api/mission', {
+      const res  = await fetch('/api/mission', {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pallet_id: palletId, source, source_level: sourceLevel, destination }),
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({pallet_id: palletId, source, source_level: sourceLevel, destination}),
       });
-
       const json = await res.json();
 
       if (!res.ok || json.error) {
-        showToast(`Error: ${json.error || 'Unknown error'}`, 'error');
-        return;
+        showToast(`Error: ${json.error || 'Unknown error'}`, 'error'); return;
       }
 
-      showToast(`Mission sent: ${palletId} from ${formatLocation(source)} to ${formatLocation(destination)}`, 'success');
+      showToast(`Mission sent: ${palletId} → ${formatLocation(destination)}`, 'success');
       addHistoryItem(json.mission);
       _missionCount++;
       setText('statMissions', String(_missionCount));
       form.reset();
-
     } catch (err) {
       showToast(`Network error: ${err.message}`, 'error');
     } finally {
@@ -624,29 +793,21 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ---------------------------------------------------------------------------
-// History
+// Mission history
 // ---------------------------------------------------------------------------
 
 function addHistoryItem(mission) {
   const list = document.getElementById('historyList');
   if (!list) return;
-
-  // Remove placeholder
-  const placeholder = list.querySelector('.dim');
-  if (placeholder) placeholder.remove();
+  list.querySelector('.dim')?.remove();
 
   const li = document.createElement('li');
   li.className = 'history-item';
   li.innerHTML =
-    `<span class="hist-id">${mission.pallet_id}</span>
-     <span class="hist-meta"> · ${formatLocation(mission.source)} (L${mission.source_level}) → ${formatLocation(mission.destination)}</span>`;
-
+    `<span class="hist-id">${mission.pallet_id}</span>` +
+    `<span class="hist-meta"> · ${formatLocation(mission.source)} (L${mission.source_level}) → ${formatLocation(mission.destination)}</span>`;
   list.insertBefore(li, list.firstChild);
-
-  // Trim to max
-  while (list.children.length > MAX_HISTORY) {
-    list.removeChild(list.lastChild);
-  }
+  while (list.children.length > MAX_HISTORY) list.removeChild(list.lastChild);
 }
 
 // ---------------------------------------------------------------------------
@@ -658,14 +819,10 @@ let _toastTimer = null;
 function showToast(msg, type = 'success') {
   const toast = document.getElementById('toast');
   if (!toast) return;
-
   toast.textContent = msg;
   toast.className   = `toast ${type}`;
-
   if (_toastTimer) clearTimeout(_toastTimer);
-  _toastTimer = setTimeout(() => {
-    toast.className = 'toast hidden';
-  }, 4000);
+  _toastTimer = setTimeout(() => { toast.className = 'toast hidden'; }, 4000);
 }
 
 // ---------------------------------------------------------------------------
@@ -674,11 +831,8 @@ function showToast(msg, type = 'success') {
 
 function startUptimeClock() {
   setInterval(() => {
-    const elapsed = Math.floor((Date.now() - _startTime) / 1000);
-    const h = Math.floor(elapsed / 3600);
-    const m = Math.floor((elapsed % 3600) / 60);
-    const s = elapsed % 60;
-    setText('statUptime', `${pad(h)}:${pad(m)}:${pad(s)}`);
+    const s = Math.floor((Date.now() - _startTime) / 1000);
+    setText('statUptime', `${pad(Math.floor(s/3600))}:${pad(Math.floor(s%3600/60))}:${pad(s%60)}`);
     setText('statEvents', String(_eventCount));
   }, 1000);
 }
@@ -697,17 +851,9 @@ function setStyle(id, prop, value) {
   if (el) el.style[prop] = value;
 }
 
-function pad(n) {
-  return String(n).padStart(2, '0');
-}
+function pad(n) { return String(n).padStart(2, '0'); }
 
-/**
- * Format a location identifier for human display.
- * "truck_1" → "Truck 1", "rack_2" → "Rack 2"
- */
 function formatLocation(loc) {
   if (!loc) return '—';
-  return loc
-    .replace('_', ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  return loc.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
 }

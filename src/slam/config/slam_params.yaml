@@ -1,63 +1,118 @@
 slam_node:
   ros__parameters:
-    # Grid dimensions
-    resolution:   0.05          # m/cell  (5 cm)
-    map_width:    400            # cells   (20 m)
-    map_height:   400            # cells   (20 m)
+    # ── Grid ─────────────────────────────────────────────────────
+    resolution:   0.05          # m/cell (5 cm)
+    map_width:    400           # cells  (20 m)
+    map_height:   400           # cells  (20 m)
 
-    # Log-odds thresholds — re-balanced for the heal-vs-remember tradeoff.
-    # Bias toward "occupied wins" (l_occ / |l_free| ≈ 2.5×) so distant walls
-    # don't get voted out by grazing free-rays; asymmetric clamps (occupied
-    # remembers longer than free does) so once established walls survive
-    # being briefly out of view, but ghost cells from a pre-ICP-correction
-    # pose still fade within ~10–15 contradicting observations.
-    l_occ:        0.50           # increment per LiDAR hit
-    l_free:      -0.20           # decrement per free ray cell
-    l_min:       -2.0            # clamp minimum (free saturates fast)
-    l_max:        3.5            # clamp maximum (occupied persists longer)
+    # Log-odds increments + clamps.  Bias toward "occupied wins"
+    # (l_occ / |l_free| ≈ 2.5×) so distant walls don't get voted out
+    # by grazing free-rays.  Asymmetric clamps mean occupied
+    # remembers longer than free, so once a wall is established it
+    # survives being briefly out of view.
+    l_occ:        0.50
+    l_free:      -0.20
+    l_min:       -2.0
+    l_max:        3.5
 
-    # ICP scan matcher — enabled for real robot to correct heading drift
-    use_icp:          true
-    icp_max_iter:     30         # more iterations → better convergence on noisy data
-    icp_tolerance:    0.0001
-    icp_reject_dist:  0.5        # generous for real-world laser noise (was 0.3)
-    icp_min_points:   20         # fallback to odometry if fewer inliers
-    icp_max_fitness:  0.2        # reject ICP if mean error exceeds this (m)
+    # Display thresholds for to_ros_data() — higher evidence required
+    # to classify a cell as occupied/free in the published map.
+    display_l_occ:   1.5
+    display_l_free: -0.8
 
-    # Map frame initial heading (radians).  Rotates the entire map frame at
-    # startup so walls appear horizontal/vertical without the robot needing
-    # to start facing a specific direction.  This corrects the large constant
-    # tilt you see after driving around.
-    # Measure: in RViz, estimate how many degrees CCW the whole map is tilted
-    # relative to the room.  Set map_initial_heading to that angle in radians.
-    # Quick conversions: 30° = 0.524  |  45° = 0.785  |  -45° = -0.785
-    map_initial_heading: 0.0
-
-    # Fine-trim on the TF-resolved laser mounting yaw (radians).
-    # Use this to remove a constant map rotation without editing the URDF.
-    # Measure the wall tilt in RViz (positive = CCW in map view).
-    # If walls tilt clockwise by 5°: laser_yaw_trim: -0.0873
-    # If walls tilt CCW by 5°:       laser_yaw_trim:  0.0873
-    laser_yaw_trim: 0.0
-
-    # Scan filtering
+    # ── Scan filtering ───────────────────────────────────────────
     range_min:   0.12
     range_max:   10.0
 
-    # Publish /map every N scans (lower = more CPU)
+    # Process every Nth ray (1 = all, higher = faster).  10 Hz LiDAR
+    # gives us little time per scan; ray_step ≥ 2 leaves more budget
+    # for ICP + KDTree + normals.
+    ray_step: 2
+
+    # ── Map publish cadence ──────────────────────────────────────
     map_publish_every: 5
 
-    # Ray subsampling: process every Nth ray (1 = all rays, 3 = 3x speedup)
-    ray_step: 3
+    # ── Map-update gating ────────────────────────────────────────
+    # Minimum motion before integrating a scan — suppresses
+    # stationary jitter.
+    min_delta_xy:    0.05   # m
+    min_delta_theta: 0.05   # rad (~3°)
+    # Force an integration when the scan itself changes by this
+    # much (RMS range delta) even if odom says we haven't moved —
+    # catches silent odom drift / wheel slip.
+    min_scan_diff:   0.07   # m
 
-    # Minimum movement before updating the occupancy grid.  Suppresses
-    # spurious jitter updates while the robot is stationary.
-    min_delta_xy:    0.05   # metres (was 0.02 — real odometry jitter is ~1-3 cm)
-    min_delta_theta: 0.05   # radians (~3 deg; was 0.01 — suppresses heading noise)
+    # ── ICP scan matcher ─────────────────────────────────────────
+    use_icp:                true
+    icp_max_iter:           25
+    # 5 mm per-iteration tolerance.  At 1e-4 m (0.1 mm) point-to-line ICP
+    # often hits max_iter without flagging converged=True even when the
+    # fitness is already at the LiDAR noise floor, which used to cause
+    # false rejections.  Acceptance is now driven by fitness alone, but
+    # we still loosen this so the convergence flag is informative again.
+    icp_tolerance:          0.005
+    icp_reject_dist:        0.5     # generous for noisy real LiDAR
+    icp_min_points:         25
+    icp_max_fitness:        0.25    # hard ceiling on RMS inlier error (m)
 
-    # Display thresholds for to_ros_data() — higher evidence required to
-    # classify a cell as occupied/free in the published map.  With
-    # l_occ=0.50 and l_free=-0.20, display_l_occ=1.5 requires ~3 net hits
-    # and display_l_free=-0.8 requires ~4 net free observations.
-    display_l_occ:   1.5
-    display_l_free: -0.8
+    # Point-to-line ICP (much more stable on long walls + corners)
+    icp_use_point_to_line:  true
+    icp_normal_neighbors:   8
+
+    # Scan-to-map matcher
+    icp_map_radius:         6.0     # m disc around robot
+    icp_map_occ_threshold: -1.0     # -1 → use display_l_occ
+    icp_map_voxel:          0.10    # m — downsample map cloud to this voxel
+    icp_map_max_pts:        3000    # cap on map cloud size (random subsample)
+
+    # Scan accumulation buffer (fallback ICP target when the map
+    # is too sparse — e.g. at startup)
+    icp_scan_accum_n:       4
+
+    # Adaptive quality gate: median of recent successful fitness
+    # values × factor, clamped to icp_max_fitness on top and 0.05 m
+    # on the bottom.  Tighter than a fixed threshold when the
+    # robot is matching well, looser when LiDAR noise spikes.
+    icp_fitness_gate_factor: 3.0
+    icp_fitness_history_n:   20
+
+    # Pose-jump rejection — at 10 Hz scans, anything bigger than
+    # this between successive scans is almost certainly a wrong
+    # association.
+    icp_jump_xy_max:        0.30   # m   (= 3 m/s for one scan period)
+    icp_jump_theta_max:     0.40   # rad (~23° per scan)
+
+    # FFT polar correlation pre-alignment — gives ICP a good
+    # rotation init when the robot is turning fast (10 Hz can lose
+    # 5–15° per scan otherwise).
+    icp_fft_prealign:       true
+    icp_fft_max_angle_deg:  30.0   # discard FFT estimate if it exceeds this
+
+    # Recovery: after N consecutive bad ICP iterations, run a
+    # particle filter over the local map cloud and snap to the
+    # best-scoring hypothesis.
+    recovery_bad_streak:    5
+    pf_n_particles:         40
+    pf_xy_spread:           0.20   # m  std-dev of xy perturbation
+    pf_theta_spread:        0.20   # rad std-dev of θ perturbation
+    pf_sigma:               0.15   # m  kernel bandwidth in the score
+
+    # ── TF smoothing ─────────────────────────────────────────────
+    # EMA on the published map→odom transform.  Setting this < 1.0
+    # damps per-scan jitter but introduces a lag during fast
+    # rotations: because odom→base_footprint updates immediately
+    # while map→odom lags, RViz sees the lidar scan rotating
+    # relative to the map.  1.0 = no smoothing (default).
+    tf_smoothing_alpha: 1.0
+
+    # ── Initial map orientation ──────────────────────────────────
+    # Rotate the map frame at startup so the room appears axis-
+    # aligned even if the robot doesn't start facing X.
+    map_initial_heading: 0.0
+
+    # Fine-trim on the TF-resolved laser mounting yaw.
+    # Positive = CCW correction in map view.
+    laser_yaw_trim: 0.0
+
+    # ── Base frame (TF) ──────────────────────────────────────────
+    base_frame: base_link

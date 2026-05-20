@@ -156,6 +156,40 @@ class OccupancyGrid:
         np.clip(self._log, self.l_min, self.l_max, out=self._log)
 
     # ------------------------------------------------------------------
+    # Point-cloud extraction (for scan-to-map ICP)
+    # ------------------------------------------------------------------
+
+    def get_occupied_points(self, robot_x=None, robot_y=None,
+                            radius=None, threshold=None):
+        """
+        Return world-frame (x, y) coordinates of every cell whose
+        log-odds exceed `threshold` (default: display_l_occ).
+
+        When robot_x/robot_y/radius are given, points outside that
+        disc are discarded — the local scan can only match nearby
+        map structure, so passing the full grid wastes CPU and
+        invites spurious matches at the other end of the room.
+        """
+        if threshold is None:
+            threshold = self.display_l_occ
+
+        mask = self._log > threshold
+        if not mask.any():
+            return np.empty((0, 2), dtype=np.float64)
+
+        cy_idx, cx_idx = np.nonzero(mask)
+        xs = self.origin_x + (cx_idx + 0.5) * self.resolution
+        ys = self.origin_y + (cy_idx + 0.5) * self.resolution
+
+        if robot_x is not None and robot_y is not None and radius is not None:
+            d2   = (xs - robot_x) ** 2 + (ys - robot_y) ** 2
+            keep = d2 <= radius ** 2
+            xs   = xs[keep]
+            ys   = ys[keep]
+
+        return np.column_stack([xs, ys])
+
+    # ------------------------------------------------------------------
     # Serialise for ROS
     # ------------------------------------------------------------------
 
