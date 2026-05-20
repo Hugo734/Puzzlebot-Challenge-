@@ -266,20 +266,6 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /plan
       Value: true
-    - Class: rviz_default_plugins/Image
-      Enabled: true
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: Image
-      Normalize Range: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /video_source/raw
-      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -324,9 +310,7 @@ Window Geometry:
   Height: 1016
   Hide Left Dock: false
   Hide Right Dock: false
-  Image:
-    collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001560000039efc0200000003fb000000100044006900730070006c006100790073010000003d0000024a000000c900fffffffb0000000a00560069006500770073000000022b0000013c000000a400fffffffb0000000a0049006d006100670065010000028d0000014e0000002800ffffff000005de0000039e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000001000000000000015600000352fc0200000002fb000000100044006900730070006c006100790073010000003d0000024a000000c900fffffffb0000000a00560069006500770073000000022b0000013c000000a400ffffff000005de00000352000000040000000400000008000000080fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
   Width: 1850

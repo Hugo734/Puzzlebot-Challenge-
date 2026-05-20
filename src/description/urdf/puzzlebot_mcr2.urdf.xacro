@@ -61,7 +61,7 @@
     <visual>
       <origin xyz="0.050 0 0.0965" rpy="1.5708 0 3.1416"/>
       <geometry>
-        <mesh filename="package://description/meshes/MCR2_puzzlebot_jetson_lidar_base.stl"/>
+        <mesh filename="package://description/meshes/Puzzlebot_Jetson_Lidar_Edition_Base.stl"/>
       </geometry>
       <material name="dark_grey">
         <color rgba="0.3 0.3 0.3 1.0"/>

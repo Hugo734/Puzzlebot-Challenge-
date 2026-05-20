@@ -93,24 +93,13 @@ def generate_launch_description():
         output='screen',
     )
 
-    # Static fallback so RViz can render the robot before the first real_odom TF.
-    odom_to_base = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='odom_to_base_footprint',
-        arguments=['0', '0', '0', '0', '0', '0', 'odom', 'base_footprint'],
-        output='screen',
-    )
-
     # Always bridge both common RPLidar A1 frame names to lidar_link so SLAM
     # and RViz work regardless of which frame_id the driver publishes.
-    # rplidar_ros publishes 'laser' or 'laser_link' depending on version/config;
-    # having both as children of lidar_link is harmless.
     lidar_frame_laser = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='lidar_frame_laser',
-        arguments=['0', '0', '0', '0', '0', '0', 'lidar_link', 'laser'],
+        arguments=['--frame-id', 'lidar_link', '--child-frame-id', 'laser'],
         output='screen',
     )
 
@@ -118,7 +107,7 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='lidar_frame_laser_link',
-        arguments=['0', '0', '0', '0', '0', '0', 'lidar_link', 'laser_link'],
+        arguments=['--frame-id', 'lidar_link', '--child-frame-id', 'laser_link'],
         output='screen',
     )
 
@@ -171,7 +160,6 @@ def generate_launch_description():
         joint_state_publisher,
         velocity_bridge,
         real_odom,
-        odom_to_base,
         lidar_frame_laser,
         lidar_frame_laser_link,
         slam_node,

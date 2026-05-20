@@ -18,7 +18,12 @@ from std_msgs.msg import Float32
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformBroadcaster
-from tf_transformations import quaternion_from_euler
+
+
+def _quat_from_yaw(yaw):
+    """Return (x, y, z, w) quaternion for a pure Z rotation."""
+    cy, sy = math.cos(yaw * 0.5), math.sin(yaw * 0.5)
+    return (0.0, 0.0, sy, cy)
 
 
 class RealOdom(Node):
@@ -83,7 +88,7 @@ class RealOdom(Node):
         self._x  += d_s * math.cos(self._th)
         self._y  += d_s * math.sin(self._th)
 
-        q   = quaternion_from_euler(0.0, 0.0, self._th)
+        q   = _quat_from_yaw(self._th)
         now = self.get_clock().now().to_msg()
 
         self._odom_msg.header.stamp = now
