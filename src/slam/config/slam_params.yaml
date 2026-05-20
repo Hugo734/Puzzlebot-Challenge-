@@ -45,15 +45,17 @@ slam_node:
     # ── ICP scan matcher ─────────────────────────────────────────
     use_icp:                true
     icp_max_iter:           25
-    # 5 mm per-iteration tolerance.  At 1e-4 m (0.1 mm) point-to-line ICP
-    # often hits max_iter without flagging converged=True even when the
-    # fitness is already at the LiDAR noise floor, which used to cause
-    # false rejections.  Acceptance is now driven by fitness alone, but
-    # we still loosen this so the convergence flag is informative again.
     icp_tolerance:          0.005
-    icp_reject_dist:        0.5     # generous for noisy real LiDAR
-    icp_min_points:         15      # lowered from 25 so the matcher can engage on sparser maps
-    icp_max_fitness:        0.25    # hard ceiling on RMS inlier error (m)
+    icp_reject_dist:        0.45    # tighter inlier gate (was 0.5)
+    # Inlier-count gate: ICP only accepts a match if at least this many
+    # scan points fell within reject_dist of the map.  Tuned to ~25%
+    # of a sub-sampled scan (180 points × ray_step=2): real matches
+    # in this room consistently exceed 45 inliers; spurious matches
+    # rarely clear it.
+    icp_min_points:         45
+    # RMS-of-inlier-distance ceiling.  Real matches in this room are
+    # ~0.13-0.17 m; 0.20 m gives margin for residual slip + noise.
+    icp_max_fitness:        0.20
 
     # Point-to-line ICP (much more stable on long walls + corners)
     icp_use_point_to_line:  true
@@ -114,13 +116,15 @@ slam_node:
     csm_fine_xy_step:       0.02    # m
     csm_fine_th_radius:     0.025   # rad (~1.4°)
     csm_fine_th_step:       0.005   # rad (~0.29°)
-    csm_min_score:          15.0
-    # Lowered from 80 → 30: CSM needs enough cells to be useful, but
-    # 80 was so high that during bootstrap (small map ≈ 50 cells) the
-    # matcher fell back to ICP-only on sparse maps, which produces wild
-    # 100°+ rotation guesses that the gate then rejects → map stops
-    # growing → matcher stays broken.  30 lets CSM engage as soon as
-    # the warmup has put a few walls into the map.
+    # CSM acceptance score: sum of (clamped-positive) log-odds at the
+    # cells under the scan rays.  In this room real matches score
+    # 130-300; pure-noise alignments rarely exceed 50.  90 sits in
+    # the safe gap.
+    csm_min_score:          90.0
+    # Min occupied cells in the local map disc before CSM is used.
+    # 30 was tuned for fresh-map bootstrap; in localization mode the
+    # preloaded map already has hundreds of cells, so we can stay at
+    # 30 (CSM engages immediately).
     csm_min_occupied_cells: 30
 
     # ── Rotation correction clamp (rotation drift safety net) ────

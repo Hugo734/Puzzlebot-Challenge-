@@ -326,6 +326,52 @@ def multi_resolution_csm(grid, cloud_base, init_pose,
     return (fx, fy, fth), fs_score
 
 
+def global_localization(grid, cloud_base,
+                        xy_step=0.30, th_step_deg=8.0,
+                        center=None,
+                        score_floor=0.0):
+    """
+    Locate the robot inside a pre-loaded map *without* an initial pose
+    guess.  Runs a 3-stage coarse-to-fine search:
+
+      1.  Hyper-coarse:  whole map  × ±180°    (xy_step,    th_step)
+      2.  Coarse:        ±xy_step   × ±th_step (xy_step/3,  th_step/3)
+      3.  Fine:          ±xy_step/3 × ±th_step/3  (1 cell, ≈1°)
+
+    Returns ((x, y, theta), score).  Total cost is ~2-3× one
+    multi-resolution_csm call (in our environment, ~100–200 ms).
+    The caller decides whether `score` is high enough to trust.
+    """
+    # Stage 1 — global scan
+    half_w = (grid.width  * grid.resolution) / 2.0
+    half_h = (grid.height * grid.resolution) / 2.0
+    radius_xy = max(half_w, half_h)        # covers the whole map
+    th_step   = math.radians(th_step_deg)
+    if center is None:
+        # Search centered on the map's centre (origin + half-extent).
+        center = (grid.origin_x + half_w, grid.origin_y + half_h, 0.0)
+    g_x, g_y, g_th, g_score = correlative_scan_match(
+        grid, cloud_base, center,
+        xy_radius=radius_xy, xy_step=xy_step,
+        th_radius=math.pi,   th_step=th_step,
+        score_floor=score_floor)
+
+    # Stage 2 — refine ±xy_step / ±th_step around stage-1 winner
+    c_x, c_y, c_th, c_score = correlative_scan_match(
+        grid, cloud_base, (g_x, g_y, g_th),
+        xy_radius=xy_step,        xy_step=xy_step / 3.0,
+        th_radius=th_step,        th_step=th_step / 3.0,
+        score_floor=score_floor)
+
+    # Stage 3 — fine refinement, one-cell / ≈1° steps
+    f_x, f_y, f_th, f_score = correlative_scan_match(
+        grid, cloud_base, (c_x, c_y, c_th),
+        xy_radius=xy_step / 3.0,  xy_step=grid.resolution,
+        th_radius=th_step / 3.0,  th_step=math.radians(1.0),
+        score_floor=score_floor)
+    return (f_x, f_y, f_th), f_score
+
+
 def transform_points(points, x, y, theta):
     """Transform points from robot/base frame to world frame."""
     c, s = math.cos(theta), math.sin(theta)

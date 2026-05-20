@@ -35,7 +35,7 @@ from slam.occupancy_grid import OccupancyGrid
 from slam.icp import (
     scan_to_points, transform_points, icp,
     voxel_downsample, polar_scan_correlation, scan_diff,
-    range_outlier_filter, multi_resolution_csm,
+    range_outlier_filter, multi_resolution_csm, global_localization,
 )
 
 
@@ -185,6 +185,19 @@ class SLAMNode(Node):
         # has structure from the very first scan.  Set initial_x/y/theta to
         # the robot's approximate starting position in the saved map frame,
         # or use RViz "2D Pose Estimate" → /initialpose to correct at runtime.
+        #
+        # When auto_localize is true AND a map_yaml is loaded, the node
+        # runs a global scan-to-map search (full map × ±180°) on the first
+        # scans and snaps the SLAM pose to the best-scoring hypothesis.
+        # The robot can start anywhere in the saved map and find itself.
+        self.declare_parameter('auto_localize',            True)
+        self.declare_parameter('auto_localize_xy_step',    0.30)   # m
+        self.declare_parameter('auto_localize_th_step_deg', 8.0)
+        # Threshold for accepting the global-CSM result at startup.
+        # Empirically real matches in this room score 250-450; bad
+        # alignments score <150.  180 is in the safe gap.
+        self.declare_parameter('auto_localize_min_score',  180.0)
+        self.declare_parameter('auto_localize_max_tries',  6)
         self.declare_parameter('map_yaml',        '')
         self.declare_parameter('initial_x',       0.0)
         self.declare_parameter('initial_y',       0.0)
@@ -228,6 +241,28 @@ class SLAMNode(Node):
         map_yaml = self.get_parameter('map_yaml').value
         if map_yaml:
             self._preload_map(os.path.expanduser(map_yaml))
+
+        # Auto-localize state: pending only when a map was loaded AND
+        # the user wants the global search.  Skipped during mapping
+        # (no preloaded map) because in that case the SLAM frame is
+        # defined by the robot's own starting position.
+        self._auto_localize_pending = (
+            bool(map_yaml)
+            and self.get_parameter('auto_localize').value
+        )
+        self._auto_localize_tries = 0
+
+        # Localization mode: a preloaded map means we should
+        #   (a) run the matcher on EVERY scan, not just keyframes,
+        #       because the loaded map is fixed and continuous matching
+        #       is what keeps the LiDAR readings aligned during motion;
+        #   (b) freeze the map — don't let new observations modify it,
+        #       which would smear the carefully-built saved map.
+        self._localization_mode = bool(map_yaml)
+        if self._localization_mode:
+            self.get_logger().info(
+                'Localization mode active: keyframe_mode disabled, '
+                'map updates frozen (using saved map as ground truth).')
 
         # ── State: SLAM / odom poses ──────────────────────────────
         self._sx = self.get_parameter('initial_x').value
@@ -386,7 +421,36 @@ class SLAMNode(Node):
         siny = 2.0 * (q.w * q.z + q.x * q.y)
         cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         theta = math.atan2(siny, cosy)
+        # If a manual estimate arrives, treat auto-localize as resolved.
+        self._auto_localize_pending = False
         self._set_pose(float(p.x), float(p.y), theta)
+
+    def _try_auto_localize(self, cloud) -> bool:
+        """
+        Run a 3-stage coarse-to-fine global scan-to-map search and snap
+        the SLAM pose to the winning hypothesis if its score clears
+        `auto_localize_min_score`.  Returns True iff the pose was set.
+        """
+        xy_step    = self.get_parameter('auto_localize_xy_step').value
+        th_step_d  = self.get_parameter('auto_localize_th_step_deg').value
+        min_score  = self.get_parameter('auto_localize_min_score').value
+        t0 = self.get_clock().now()
+        (x, y, th), score = global_localization(
+            self.grid, cloud,
+            xy_step=xy_step, th_step_deg=th_step_d,
+            score_floor=0.0)
+        dt_ms = (self.get_clock().now() - t0).nanoseconds * 1e-6
+        if score < min_score:
+            self.get_logger().warn(
+                f'Auto-localize attempt {self._auto_localize_tries + 1}: '
+                f'best pose=({x:+.2f}, {y:+.2f}, {math.degrees(th):+.1f}°)  '
+                f'score={score:.1f} < {min_score:.1f}  ({dt_ms:.0f} ms)')
+            return False
+        self.get_logger().info(
+            f'Auto-localized in {dt_ms:.0f} ms → pose=({x:+.2f}, {y:+.2f}, '
+            f'{math.degrees(th):+.1f}°)  score={score:.1f}')
+        self._set_pose(float(x), float(y), float(th))
+        return True
 
     # ──────────────────────────────────────────────────────────────
     # TF heartbeat
@@ -518,6 +582,33 @@ class SLAMNode(Node):
         if len(cloud) < self.get_parameter('icp_min_points').value:
             return
 
+        # ── Auto-localization (one-shot at startup, localization mode) ─
+        # When a saved map was preloaded but no initial pose is known,
+        # run a global scan-to-map search over the whole map × ±180°.
+        # The best hypothesis becomes the SLAM pose for the rest of the
+        # session.  Skips the rest of the callback for that frame so
+        # the matcher starts fresh next scan with a sensible guess.
+        if self._auto_localize_pending:
+            if self._try_auto_localize(cloud):
+                self._auto_localize_pending = False
+            else:
+                self._auto_localize_tries += 1
+                if self._auto_localize_tries >= int(
+                        self.get_parameter('auto_localize_max_tries').value):
+                    self.get_logger().warn(
+                        f'Auto-localize gave up after '
+                        f'{self._auto_localize_tries} tries — falling back '
+                        f'to initial pose ({self._sx:.2f}, {self._sy:.2f}, '
+                        f'{math.degrees(self._stheta):.1f}°).  Set the pose '
+                        f'manually via RViz 2D Pose Estimate.')
+                    self._auto_localize_pending = False
+            # Skip the rest of this frame either way — the pose state is
+            # being rewritten and the next scan will run the matcher.
+            now = self.get_clock().now().to_msg()
+            self._publish_pose(now)
+            self._publish_tf(now)
+            return
+
         # ── Pose propagation: odom-derived initial guess ─────────
         self._propagate_from_odom()
         pre_match_theta = self._stheta
@@ -530,7 +621,13 @@ class SLAMNode(Node):
         # shear both vanish, so the scan-to-map correspondence is
         # clean and the matcher can snap the pose back to its true
         # value.  Outside keyframes the SLAM pose just rides odom.
-        keyframe_mode = self.get_parameter('keyframe_mode').value
+        #
+        # IN LOCALIZATION MODE this gate is disabled: the saved map
+        # is fixed (no contamination risk) and we WANT the matcher to
+        # run on every scan to keep the LiDAR aligned with the map
+        # during motion.
+        keyframe_mode = (self.get_parameter('keyframe_mode').value
+                         and not self._localization_mode)
         v_thr = self.get_parameter('keyframe_v_threshold').value
         w_thr = self.get_parameter('keyframe_w_threshold').value
         still = (abs(scan_omega) < w_thr and self._odom_speed() < v_thr)
@@ -910,6 +1007,8 @@ class SLAMNode(Node):
         """
         Apply motion + confidence gates, then run the log-odds update.
 
+        Localization mode short-circuits everything: the map is frozen.
+
         Confidence gate:
           - If the matcher ran and EXPLICITLY rejected the scan
             (matcher_rejected=True), we hold off on integration.
@@ -923,6 +1022,9 @@ class SLAMNode(Node):
             deadlocked the bootstrap because the matcher cannot run
             without a target and the map cannot grow without integration.
         """
+        if self._localization_mode:
+            return
+
         sx, sy, sth = scan_slam
         min_xy    = self.get_parameter('min_delta_xy').value
         min_theta = self.get_parameter('min_delta_theta').value

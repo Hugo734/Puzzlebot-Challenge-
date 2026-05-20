@@ -82,6 +82,13 @@ class NavNode(Node):
         self.declare_parameter('goal_tolerance',      0.20)
         self.declare_parameter('lookahead_distance',  0.40)
         self.declare_parameter('control_rate',        10.0)
+        # Drive backwards when the lookahead point sits behind the
+        # robot AND is close.  Lets the robot escape tight pockets
+        # without sweeping its chassis through whatever forced the
+        # tight turn.  reverse_max_dist caps how far we'll drive in
+        # reverse before insisting on a forward maneuver.
+        self.declare_parameter('allow_reverse',       True)
+        self.declare_parameter('reverse_max_dist',    0.60)
         self.declare_parameter('obstacle_distance',   0.50)   # front-arc stop threshold (m)
         self.declare_parameter('obstacle_angle_deg',  55.0)   # half-angle of front arc (deg)
         self.declare_parameter('wall_follow_dist',    0.45)   # target wall distance (m)
@@ -304,8 +311,33 @@ class NavNode(Node):
         wmax = self.get_parameter('angular_max').value
         vmax = self.get_parameter('linear_speed').value
 
-        omega = self._clamp(kp * heading_error, -wmax, wmax)
-        speed = vmax * max(0.0, math.cos(heading_error)) * min(1.0, dist_to_goal / 0.5)
+        # ── Reverse maneuver decision ──────────────────────────────
+        # When the lookahead point is in the rear hemisphere AND close
+        # to the robot, drive backwards instead of pirouetting 180°.
+        # This handles the case where the robot is wedged near a wall
+        # and the next leg of the plan curls back behind it.
+        # Threshold: |heading_error| > π/2 + a small dead-band, and
+        # lookahead dist below `reverse_max_dist` so we never drive
+        # backwards across long open stretches (less precise control).
+        allow_reverse    = self.get_parameter('allow_reverse').value
+        reverse_max_dist = self.get_parameter('reverse_max_dist').value
+        lookahead_dist   = math.hypot(lx - px, ly - py)
+        use_reverse = (
+            allow_reverse
+            and abs(heading_error) > (math.pi / 2.0 + 0.1)
+            and lookahead_dist <= reverse_max_dist
+        )
+
+        if use_reverse:
+            ctrl_error = self._wrap_angle(heading_error - math.pi)
+            sign = -1.0
+        else:
+            ctrl_error = heading_error
+            sign = +1.0
+
+        omega = self._clamp(kp * ctrl_error, -wmax, wmax)
+        speed_mag = vmax * max(0.0, math.cos(ctrl_error)) * min(1.0, dist_to_goal / 0.5)
+        speed = sign * speed_mag
 
         cmd = Twist()
         cmd.linear.x = speed
@@ -439,8 +471,22 @@ class NavNode(Node):
         wmax = self.get_parameter('angular_max').value
         vmax = self.get_parameter('linear_speed').value
 
-        omega = self._clamp(kp * heading_error, -wmax, wmax)
-        speed = vmax * 0.7 * max(0.0, math.cos(heading_error)) * min(1.0, dist / 0.3)
+        allow_reverse    = self.get_parameter('allow_reverse').value
+        reverse_max_dist = self.get_parameter('reverse_max_dist').value
+        use_reverse = (
+            allow_reverse
+            and abs(heading_error) > (math.pi / 2.0 + 0.1)
+            and dist <= reverse_max_dist
+        )
+        if use_reverse:
+            ctrl_error = self._wrap_angle(heading_error - math.pi)
+            sign = -1.0
+        else:
+            ctrl_error = heading_error
+            sign = +1.0
+
+        omega = self._clamp(kp * ctrl_error, -wmax, wmax)
+        speed = sign * vmax * 0.7 * max(0.0, math.cos(ctrl_error)) * min(1.0, dist / 0.3)
 
         cmd = Twist()
         cmd.linear.x = speed

@@ -47,6 +47,8 @@ class PathFollower:
         max_angular: float = 1.0,
         goal_tolerance: float = 0.10,
         heading_tolerance: float = 0.2,
+        allow_reverse: bool = True,
+        reverse_max_dist: float = 0.50,
     ) -> None:
         self.kp_angular = kp_angular
         self.ki_angular = ki_angular
@@ -56,6 +58,15 @@ class PathFollower:
         self.max_angular = max_angular
         self.goal_tolerance = goal_tolerance
         self.heading_tolerance = heading_tolerance
+        # When the next waypoint sits in the robot's REAR hemisphere
+        # (|heading_error| > π/2), driving backwards is shorter than a
+        # 180° pirouette — and crucially, doesn't sweep the chassis
+        # through whatever forced the tight turn in the first place
+        # (table leg, wall, etc.).  Capped by `reverse_max_dist`: only
+        # for the close-range maneuver out of a tight pocket; long
+        # transits always face forward.
+        self.allow_reverse = allow_reverse
+        self.reverse_max_dist = reverse_max_dist
 
         self._integral: float = 0.0
         self._prev_error: float = 0.0
@@ -103,39 +114,59 @@ class PathFollower:
             self.reset()
             return self._zero_twist(), True
 
-        # Desired heading
+        # Desired heading toward the waypoint
         desired_heading = math.atan2(dy, dx)
-
-        # Heading error — wrapped to [-pi, pi]
         heading_error = math.atan2(
             math.sin(desired_heading - yaw),
             math.cos(desired_heading - yaw),
         )
 
-        # PID on heading error
-        self._integral += heading_error * dt
-        # Anti-windup: clamp integrator
+        # ── Reverse maneuver decision ──────────────────────────────
+        # When the waypoint is in the rear hemisphere and within a
+        # short range, drive BACKWARDS rather than spinning 180°.
+        # The "control heading error" is the angle the robot needs to
+        # close so that *its tail* faces the waypoint — i.e. the
+        # forward-direction error wrapped by π.
+        use_reverse = (
+            self.allow_reverse
+            and abs(heading_error) > math.pi / 2.0
+            and distance <= self.reverse_max_dist
+        )
+        if use_reverse:
+            ctrl_error = math.atan2(
+                math.sin(heading_error - math.pi),
+                math.cos(heading_error - math.pi),
+            )
+            sign = -1.0
+        else:
+            ctrl_error = heading_error
+            sign = +1.0
+
+        # PID on the control heading error
+        self._integral += ctrl_error * dt
         max_integral = 0.5
         self._integral = max(-max_integral, min(max_integral, self._integral))
-
-        derivative = (heading_error - self._prev_error) / max(dt, 1e-6)
-        self._prev_error = heading_error
+        derivative = (ctrl_error - self._prev_error) / max(dt, 1e-6)
+        self._prev_error = ctrl_error
 
         angular = (
-            self.kp_angular * heading_error
+            self.kp_angular * ctrl_error
             + self.ki_angular * self._integral
             + self.kd_angular * derivative
         )
         angular = max(-self.max_angular, min(self.max_angular, angular))
 
-        # Linear velocity: proportional to alignment, suppressed when turning
-        if abs(heading_error) > self.heading_tolerance:
-            # Turn in place when misaligned
+        # Linear velocity: zero while misaligned, else scaled by cos
+        if abs(ctrl_error) > self.heading_tolerance:
             linear = 0.0
         else:
-            alignment = math.cos(heading_error)  # 1.0 when perfectly aligned
-            linear = self.kp_linear * distance * alignment
-            linear = max(0.0, min(self.max_linear, linear))
+            alignment = math.cos(ctrl_error)
+            linear = sign * self.kp_linear * distance * alignment
+            # Clamp magnitude, keep sign
+            if linear >= 0.0:
+                linear = min(self.max_linear, linear)
+            else:
+                linear = max(-self.max_linear, linear)
 
         twist = Twist()
         twist.linear.x = linear

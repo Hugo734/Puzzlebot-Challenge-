@@ -4,8 +4,11 @@ nav_node:
     map_yaml: ~/ros2_maps/warehouse.yaml
     waypoints_yaml: ~/ros2_maps/waypoints.yaml
 
-    # Obstacle inflation radius for A* grid (m)
-    inflation_radius: 0.30
+    # Obstacle inflation radius for A* grid (m).  Was 0.30 — caused
+    # waypoints near walls (e.g. vic) to be marked unreachable.  At
+    # 0.20 m the robot (≈ 20 cm wide) still has ~10 cm safety margin
+    # but tight goals near walls become reachable.
+    inflation_radius: 0.20
 
     # Forward speed (m/s)
     linear_speed: 0.15
