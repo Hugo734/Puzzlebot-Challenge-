@@ -90,6 +90,7 @@ def generate_launch_description():
                 f"DISPLAY=:99 "
                 f"LIBGL_ALWAYS_SOFTWARE=1 "
                 f"__GLX_VENDOR_LIBRARY_NAME=mesa "
+                f"IGN_IP=127.0.0.1 "
                 f"GZ_SIM_SYSTEM_PLUGIN_PATH={plugin_path} "
                 f"IGN_GAZEBO_SYSTEM_PLUGIN_PATH={plugin_path} "
                 f"GZ_SIM_RESOURCE_PATH={model_path} "
@@ -122,6 +123,21 @@ def generate_launch_description():
             "/scan@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan",
         ],
         remappings=[("/imu", "/imu/out")],
+        additional_env={"IGN_IP": "127.0.0.1"},
+    )
+
+    # Fallback joint_state_publisher: publishes zero-position joint states so
+    # robot_state_publisher can broadcast TF for all moveable joints.
+    # gz_ros2_control v0.7.18 has a persistent service-unresponsive bug that prevents
+    # joint_state_broadcaster from spawning; this node ensures /joint_states is always
+    # available for visualization even when the controller_manager is broken.
+    joint_state_publisher_node = TimerAction(
+        period=8.0,
+        actions=[Node(
+            package="joint_state_publisher",
+            executable="joint_state_publisher",
+            parameters=[{"use_sim_time": True}],
+        )]
     )
 
     # Spawn joint_state_broadcaster first, then puzzlebot_controller 6s later.
@@ -170,6 +186,7 @@ def generate_launch_description():
         gazebo_server,
         gz_spawn_entity,
         gz_ros2_bridge,
+        joint_state_publisher_node,
         jsb_spawner,
         diff_drive_spawner,
         cmd_vel_relay,
