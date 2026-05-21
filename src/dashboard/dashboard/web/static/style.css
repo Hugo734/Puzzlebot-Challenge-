@@ -195,6 +195,27 @@ body {
 
 .map-edit-hint.hidden { display: none; }
 
+.map-source-badge {
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  border: 1px solid;
+  backdrop-filter: blur(4px);
+}
+.map-source-badge.hidden { display: none; }
+.map-source-badge.live {
+  background: rgba(0, 255, 136, 0.12);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.map-source-badge.static {
+  background: rgba(255, 170, 0, 0.12);
+  border-color: #ffaa00;
+  color: #ffaa00;
+}
+
 /* ===================================================================
    MAP LEGEND OVERLAY (bottom-left)
    =================================================================== */

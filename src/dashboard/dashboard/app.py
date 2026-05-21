@@ -206,6 +206,19 @@ def get_map():
     return Response(png, mimetype="image/png")
 
 
+@app.route("/api/map/info")
+def get_map_info():
+    """Return map metadata: origin (m), resolution (m/px), size (px), source."""
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+
+    info = ros_bridge.get_map_info()
+    if not info:
+        return jsonify({"error": "No map metadata available yet"}), 404
+
+    return jsonify(info)
+
+
 @app.route("/video_feed")
 def video_feed():
     """MJPEG stream from the camera."""
@@ -551,6 +564,7 @@ def _background_socketio_emitter() -> None:
             map_b64 = (
                 base64.b64encode(map_png).decode("ascii") if map_png else None
             )
+            map_info = ros_bridge.get_map_info() or None
 
             socketio.emit(
                 "telemetry",
@@ -559,6 +573,7 @@ def _background_socketio_emitter() -> None:
                     "angular_vel": state.velocity["angular"],
                     "lifter_level": state.lifter_level,
                     "map_png": map_b64,
+                    "map_info": map_info,
                 },
             )
 

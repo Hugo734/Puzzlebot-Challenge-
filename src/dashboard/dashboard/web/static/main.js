@@ -11,10 +11,10 @@ const MAX_HISTORY     = 20;
 const TELEOP_LINEAR  = 0.18;
 const TELEOP_ANGULAR = 0.9;
 
-// Map world-space parameters (must match warehouse config)
-const MAP_ORIGIN_X   = -10.0;  // m
-const MAP_ORIGIN_Y   = -10.0;  // m
-const MAP_RESOLUTION = 0.05;   // m/pixel
+// Map world-space parameters — updated dynamically from /api/map/info
+let MAP_ORIGIN_X   = -10.0;  // m
+let MAP_ORIGIN_Y   = -10.0;  // m
+let MAP_RESOLUTION = 0.05;   // m/pixel
 
 // ---------------------------------------------------------------------------
 // Session counters
@@ -164,6 +164,31 @@ function updateTelemetry(data) {
   if (data.map_png) {
     _mapImg.src = 'data:image/png;base64,' + data.map_png;
   }
+  if (data.map_info) {
+    applyMapInfo(data.map_info);
+  }
+}
+
+function applyMapInfo(info) {
+  if (typeof info.origin_x   === 'number') MAP_ORIGIN_X   = info.origin_x;
+  if (typeof info.origin_y   === 'number') MAP_ORIGIN_Y   = info.origin_y;
+  if (typeof info.resolution === 'number') MAP_RESOLUTION = info.resolution;
+
+  const badge = document.getElementById('mapSourceBadge');
+  if (badge) {
+    const live = info.source === 'live';
+    badge.textContent = live ? 'LIVE' : 'STATIC MAP';
+    badge.className   = 'map-source-badge ' + (live ? 'live' : 'static');
+  }
+}
+
+async function loadMapInfo() {
+  try {
+    const res = await fetch('/api/map/info');
+    if (!res.ok) return;
+    const info = await res.json();
+    applyMapInfo(info);
+  } catch (_) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -744,8 +769,9 @@ document.addEventListener('DOMContentLoaded', () => {
   initWaypointPopup();
   initVoice();
 
-  // Try to preload map immediately
+  // Preload map and fetch metadata immediately
   _mapImg.src = '/api/map';
+  loadMapInfo();
 
   const form = document.getElementById('missionForm');
   if (!form) return;

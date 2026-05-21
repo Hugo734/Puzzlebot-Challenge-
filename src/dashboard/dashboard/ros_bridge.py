@@ -43,6 +43,7 @@ class RosBridge:
         self._state = RobotState()
         self._latest_frame: Optional[bytes] = None  # JPEG bytes
         self._latest_map: Optional[bytes] = None    # PNG bytes
+        self._map_info: dict = {}                   # origin, resolution, size, source
         self._waypoints: dict = {}
 
         best_effort_qos = QoSProfile(
@@ -95,8 +96,9 @@ class RosBridge:
         self._cmd_vel_pub = self._node.create_publisher(Twist, "/cmd_vel", reliable_qos)
         self._voice_pub = self._node.create_publisher(String, "/voice_command", reliable_qos)
 
-        # Load waypoints from file at startup
+        # Load waypoints and static map from file at startup
         self._load_waypoints()
+        self._load_static_map()
 
     # ------------------------------------------------------------------
     # Waypoints loading
@@ -142,6 +144,10 @@ class RosBridge:
     def get_latest_map(self) -> Optional[bytes]:
         with self._lock:
             return self._latest_map
+
+    def get_map_info(self) -> dict:
+        with self._lock:
+            return dict(self._map_info)
 
     def publish_mission(self, mission_json: str) -> None:
         from std_msgs.msg import String
@@ -245,8 +251,17 @@ class RosBridge:
         except Exception as exc:  # noqa: BLE001
             self._node.get_logger().warning(f"Map conversion failed: {exc}")
             return
+        origin = msg.info.origin.position
         with self._lock:
             self._latest_map = png
+            self._map_info = {
+                "origin_x": round(float(origin.x), 4),
+                "origin_y": round(float(origin.y), 4),
+                "resolution": round(float(msg.info.resolution), 6),
+                "width": int(msg.info.width),
+                "height": int(msg.info.height),
+                "source": "live",
+            }
 
     def _cb_scan(self, msg) -> None:
         """Downsample every 4th ray and store scan data."""
@@ -330,6 +345,105 @@ class RosBridge:
             b"\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\xff\xda\x00\x08"
             b"\x01\x01\x00\x00?\x00\xf5\x0a\xff\xd9"
         )
+
+    def _load_static_map(self) -> None:
+        """Load pre-saved map from ~/ros2_maps/ as fallback when /map isn't published."""
+        import glob
+        import yaml
+
+        maps_dir = os.path.expanduser("~/ros2_maps")
+        yaml_files = glob.glob(os.path.join(maps_dir, "*.yaml"))
+        # Filter out waypoints.yaml
+        yaml_files = [p for p in yaml_files if "waypoint" not in os.path.basename(p).lower()]
+        if not yaml_files:
+            self._node.get_logger().info("No static map YAML found in ~/ros2_maps/")
+            return
+
+        # Prefer map.yaml, otherwise take the first matching file
+        yaml_path = next(
+            (p for p in yaml_files if os.path.basename(p) == "map.yaml"),
+            yaml_files[0],
+        )
+
+        try:
+            with open(yaml_path, "r") as f:
+                meta = yaml.safe_load(f)
+        except Exception as exc:
+            self._node.get_logger().warning(f"Could not read map YAML {yaml_path}: {exc}")
+            return
+
+        pgm_file = meta.get("image", "")
+        if not pgm_file:
+            self._node.get_logger().warning(f"No 'image' field in {yaml_path}")
+            return
+        if not os.path.isabs(pgm_file):
+            pgm_file = os.path.join(maps_dir, pgm_file)
+
+        try:
+            gray = self._load_pgm(pgm_file)
+        except Exception as exc:
+            self._node.get_logger().warning(f"Could not load PGM {pgm_file}: {exc}")
+            return
+
+        # PGM from map_saver: row 0 = top of image (highest Y world coord) — no flip needed.
+        png = self._numpy_gray_to_png(gray)
+
+        origin = meta.get("origin", [-10.0, -10.0, 0.0])
+        resolution = float(meta.get("resolution", 0.05))
+        h, w = gray.shape
+
+        with self._lock:
+            self._latest_map = png
+            self._map_info = {
+                "origin_x": float(origin[0]) if isinstance(origin, list) else -10.0,
+                "origin_y": float(origin[1]) if isinstance(origin, list) else -10.0,
+                "resolution": resolution,
+                "width": w,
+                "height": h,
+                "source": "static",
+            }
+
+        self._node.get_logger().info(
+            f"Static map loaded: {w}×{h} px, res={resolution:.4f} m/px, "
+            f"origin=({self._map_info['origin_x']:.1f}, {self._map_info['origin_y']:.1f}) "
+            f"[{os.path.basename(pgm_file)}]"
+        )
+
+    @staticmethod
+    def _load_pgm(path: str) -> np.ndarray:
+        """Load a PGM file and return a uint8 grayscale numpy array."""
+        try:
+            from PIL import Image as PILImage
+            return np.array(PILImage.open(path).convert("L"), dtype=np.uint8)
+        except ImportError:
+            pass
+        try:
+            import cv2
+            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                return img
+        except ImportError:
+            pass
+        # Pure-Python P5/P2 PGM reader
+        with open(path, "rb") as f:
+            magic = f.readline().strip()
+            if magic not in (b"P5", b"P2"):
+                raise ValueError(f"Not a PGM file: {path}")
+            line = f.readline()
+            while line.startswith(b"#"):
+                line = f.readline()
+            w, h = map(int, line.split())
+            maxval = int(f.readline().strip())
+            if magic == b"P5":
+                raw = f.read()
+                arr = np.frombuffer(raw, dtype=np.uint8 if maxval < 256 else ">u2")
+                if maxval != 255:
+                    arr = (arr.astype(np.uint32) * 255 // maxval).astype(np.uint8)
+            else:
+                values = list(map(int, f.read().split()))
+                arr = np.array(values, dtype=np.uint32)
+                arr = (arr * 255 // maxval).astype(np.uint8)
+        return arr.reshape((h, w))
 
     def _map_to_png(self, msg) -> bytes:
         """Convert nav_msgs/OccupancyGrid to a PNG bytes image."""

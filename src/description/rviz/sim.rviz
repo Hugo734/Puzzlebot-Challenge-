@@ -24,7 +24,7 @@ Visualization Manager:
       Name: Grid
       Plane: XY
       Plane Cell Count: 20
-      Reference Frame: odom
+      Reference Frame: <Fixed Frame>
       Value: true
 
     - Alpha: 1
