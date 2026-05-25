@@ -87,6 +87,57 @@ body {
 }
 
 /* ===================================================================
+   MODE SWITCH (MAPPING / NAVIGATION)
+   =================================================================== */
+.mode-switch {
+  display: inline-flex;
+  border: 1px solid #2a3550;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #0f1626;
+}
+.mode-switch .mode-btn {
+  background: transparent;
+  color: #93a4c4;
+  border: none;
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.mode-switch .mode-btn.active[data-mode="MAPPING"] {
+  background: #f59e0b;
+  color: #0b0f1a;
+}
+.mode-switch .mode-btn.active[data-mode="NAVIGATION"] {
+  background: var(--accent, #00ff88);
+  color: #0b0f1a;
+}
+.mode-switch .mode-btn:not(.active):hover {
+  background: #1a2238;
+  color: #e6efff;
+}
+
+.save-map-btn {
+  background: #1e3a5f;
+  color: #cfe2ff;
+  border-color: #2c5483;
+  padding: 6px 12px;
+  font-size: 0.78rem;
+}
+.save-map-btn:hover {
+  background: #2c5483;
+  color: #ffffff;
+}
+.save-map-btn.saving {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+/* ===================================================================
    CONNECTION DOT
    =================================================================== */
 .conn-dot {

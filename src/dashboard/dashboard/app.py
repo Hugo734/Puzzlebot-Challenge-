@@ -135,8 +135,76 @@ def get_state():
             "mission": state.mission,
             "velocity": state.velocity,
             "lifter_level": state.lifter_level,
+            "system_mode": state.system_mode,
         }
     )
+
+
+@app.route("/api/mode", methods=["GET"])
+def get_mode():
+    """Return the current system mode."""
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+    return jsonify({"mode": ros_bridge.get_system_mode()})
+
+
+@app.route("/api/mode", methods=["POST"])
+def set_mode():
+    """Switch system mode.
+
+    Body:
+      {"mode": "MAPPING" | "NAVIGATION",
+       "reset_map": false  # only honoured when mode=MAPPING}
+
+    Behaviour:
+      - MAPPING → NAVIGATION: auto-saves the map (calls /map_saver/save_map)
+        before publishing the new mode.
+      - NAVIGATION → MAPPING: if reset_map=true, clears the SLAM grid first.
+    """
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+
+    body = request.get_json(silent=True) or {}
+    target = str(body.get("mode", "")).strip().upper()
+    if target not in ("MAPPING", "NAVIGATION"):
+        return jsonify({"error": "mode must be MAPPING or NAVIGATION"}), 400
+
+    current = ros_bridge.get_system_mode()
+    notes: list[str] = []
+
+    if current == "MAPPING" and target == "NAVIGATION":
+        ok, msg = ros_bridge.call_save_map()
+        notes.append(f"save_map: {'ok' if ok else 'failed'} ({msg})")
+        # We continue regardless — the user can manually save later if the
+        # service was missing.
+
+    if current == "NAVIGATION" and target == "MAPPING":
+        if bool(body.get("reset_map", False)):
+            ok, msg = ros_bridge.call_reset_map()
+            notes.append(f"reset_map: {'ok' if ok else 'failed'} ({msg})")
+
+    ros_bridge.publish_system_mode(target)
+    return jsonify({"mode": target, "previous": current, "notes": notes})
+
+
+@app.route("/api/map/save", methods=["POST"])
+def save_map():
+    """Trigger the map_saver service to persist the current SLAM map."""
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+    ok, msg = ros_bridge.call_save_map()
+    code = 200 if ok else 500
+    return jsonify({"success": ok, "message": msg}), code
+
+
+@app.route("/api/map/reset", methods=["POST"])
+def reset_map():
+    """Clear the SLAM grid (start mapping from scratch)."""
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+    ok, msg = ros_bridge.call_reset_map()
+    code = 200 if ok else 500
+    return jsonify({"success": ok, "message": msg}), code
 
 
 @app.route("/api/mission", methods=["POST"])
@@ -261,6 +329,17 @@ def add_waypoint():
     except (TypeError, ValueError):
         return jsonify({"error": "x, y, theta must be numbers"}), 400
     ros_bridge.add_waypoint(name, x, y, theta)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/waypoints/<name>", methods=["DELETE"])
+def delete_waypoint(name: str):
+    """Remove a waypoint by name."""
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+    removed = ros_bridge.delete_waypoint(name)
+    if not removed:
+        return jsonify({"error": f"waypoint {name} not found"}), 404
     return jsonify({"ok": True})
 
 
@@ -574,6 +653,7 @@ def _background_socketio_emitter() -> None:
                     "lifter_level": state.lifter_level,
                     "map_png": map_b64,
                     "map_info": map_info,
+                    "system_mode": state.system_mode,
                 },
             )
 

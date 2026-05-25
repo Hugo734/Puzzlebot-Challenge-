@@ -81,6 +81,9 @@ socket.on('robot_state', (data) => {
 socket.on('telemetry', (data) => {
   _eventCount++;
   updateTelemetry(data);
+  if (data && data.system_mode && data.system_mode !== _systemMode) {
+    applyModeToUI(data.system_mode);
+  }
 });
 
 socket.on('scan_data', (data) => { _currentScan = data; });
@@ -754,6 +757,121 @@ function updateTeleopBars(linear, angular) {
 }
 
 // ---------------------------------------------------------------------------
+// System mode (MAPPING ⇄ NAVIGATION) + Save Map
+// ---------------------------------------------------------------------------
+
+let _systemMode = 'NAVIGATION';
+
+function applyModeToUI(mode) {
+  _systemMode = mode;
+
+  // Highlight the active button
+  document.querySelectorAll('.mode-switch .mode-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+
+  // Save Map button only relevant during mapping
+  const saveBtn = document.getElementById('btnSaveMap');
+  if (saveBtn) saveBtn.classList.toggle('hidden', mode !== 'MAPPING');
+
+  // Disable nav controls in mapping mode
+  const navGo = document.getElementById('btnGoWaypoint');
+  const navCancel = document.getElementById('btnCancelNav');
+  const navSel = document.getElementById('waypointSelect');
+  [navGo, navCancel, navSel].forEach(el => {
+    if (!el) return;
+    el.disabled = (mode !== 'NAVIGATION');
+    el.title = (mode !== 'NAVIGATION')
+      ? 'Switch to NAV mode to send navigation goals'
+      : '';
+  });
+}
+
+async function fetchCurrentMode() {
+  try {
+    const res  = await fetch('/api/mode');
+    const data = await res.json();
+    if (data && data.mode) applyModeToUI(data.mode);
+  } catch (e) { /* ignore */ }
+}
+
+async function requestModeSwitch(target, options = {}) {
+  try {
+    const res  = await fetch('/api/mode', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({mode: target, ...options}),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(data.error || 'Mode switch failed', 'error');
+      return false;
+    }
+    applyModeToUI(data.mode);
+    showToast(`Mode: ${data.mode}`, 'success');
+    return true;
+  } catch (err) {
+    showToast(`Mode switch error: ${err}`, 'error');
+    return false;
+  }
+}
+
+function initSystemMode() {
+  // Fetch the current mode from the backend on startup
+  fetchCurrentMode();
+
+  // Map / Nav toggle
+  document.querySelectorAll('.mode-switch .mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.mode;
+      if (target === _systemMode) return;
+
+      if (_systemMode === 'NAVIGATION' && target === 'MAPPING') {
+        // Ask whether to continue existing map or start fresh
+        const dlg = document.getElementById('mapResetDialog');
+        if (dlg) dlg.classList.remove('hidden');
+        return;
+      }
+
+      // MAPPING → NAVIGATION (auto-save happens server-side)
+      requestModeSwitch(target);
+    });
+  });
+
+  // Dialog buttons (NAV → MAP)
+  document.getElementById('btnModeContinueMap')?.addEventListener('click', () => {
+    document.getElementById('mapResetDialog')?.classList.add('hidden');
+    requestModeSwitch('MAPPING', {reset_map: false});
+  });
+  document.getElementById('btnModeResetMap')?.addEventListener('click', () => {
+    document.getElementById('mapResetDialog')?.classList.add('hidden');
+    requestModeSwitch('MAPPING', {reset_map: true});
+  });
+  document.getElementById('btnModeCancelSwitch')?.addEventListener('click', () => {
+    document.getElementById('mapResetDialog')?.classList.add('hidden');
+  });
+
+  // Save Map button
+  document.getElementById('btnSaveMap')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btnSaveMap');
+    btn.classList.add('saving');
+    try {
+      const res  = await fetch('/api/map/save', {method: 'POST'});
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast('Map saved to ~/ros2_maps/', 'success');
+      } else {
+        showToast(`Save failed: ${data.message || 'unknown error'}`, 'error');
+      }
+    } catch (err) {
+      showToast(`Save error: ${err}`, 'error');
+    } finally {
+      btn.classList.remove('saving');
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Mission form
 // ---------------------------------------------------------------------------
 
@@ -768,6 +886,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initMapInteraction();
   initWaypointPopup();
   initVoice();
+  initSystemMode();
 
   // Preload map and fetch metadata immediately
   _mapImg.src = '/api/map';

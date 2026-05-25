@@ -41,10 +41,12 @@ from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Path
 from sensor_msgs.msg import LaserScan, PointCloud2, PointField
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
 
 from navigation.map_io import load_map, load_waypoints
 from navigation.a_star import plan as astar_plan
+from navigation.local_costmap import LocalCostmap
 
 WorldPt = Tuple[float, float]
 
@@ -54,12 +56,13 @@ WorldPt = Tuple[float, float]
 # ---------------------------------------------------------------------------
 
 class _State:
-    IDLE             = 'IDLE'
-    FOLLOWING        = 'FOLLOWING'
-    ALIGNING         = 'ALIGNING'         # in-place heading alignment at goal
-    ARRIVED          = 'ARRIVED'
-    WALL_FOLLOWING   = 'WALL_FOLLOWING'   # Bug1 phase 1
-    RETURNING_LEAVE  = 'RETURNING_LEAVE'  # Bug1 phase 2
+    IDLE              = 'IDLE'
+    FOLLOWING         = 'FOLLOWING'
+    ALIGNING          = 'ALIGNING'          # in-place heading alignment at goal
+    ARRIVED           = 'ARRIVED'
+    WAITING_FOR_CLEAR = 'WAITING_FOR_CLEAR' # path blocked, waiting for dynamic obstacle
+    WALL_FOLLOWING    = 'WALL_FOLLOWING'    # Bug1 phase 1
+    RETURNING_LEAVE   = 'RETURNING_LEAVE'   # Bug1 phase 2
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +96,31 @@ class NavNode(Node):
         self.declare_parameter('obstacle_angle_deg',  55.0)   # half-angle of front arc (deg)
         self.declare_parameter('wall_follow_dist',    0.45)   # target wall distance (m)
         self.declare_parameter('heading_tolerance',   0.12)   # rad (~7°)
+
+        # ── Local costmap (rolling LiDAR memory) ──────────────────────
+        self.declare_parameter('local_costmap_radius',        2.0)
+        self.declare_parameter('local_costmap_decay_tau',     0.7)
+        self.declare_parameter('local_costmap_occ_threshold', 0.4)
+
+        # ── Continuous path validity check ────────────────────────────
+        self.declare_parameter('path_validity_lookahead', 3.0)
+        self.declare_parameter('path_blocked_hysteresis', 3)
+
+        # ── 360° safety bubble ────────────────────────────────────────
+        self.declare_parameter('safety_bubble_radius', 0.25)
+
+        # ── Dynamic-obstacle wait policy ──────────────────────────────
+        self.declare_parameter('wait_for_clear_timeout', 5.0)
+
+        # ── System mode (gates goal acceptance) ───────────────────────
+        # When mode != NAVIGATION, /goal_waypoint commands are rejected with
+        # an ERROR status so we never try to navigate while the operator is
+        # actively mapping.
+        self.declare_parameter('start_mode', 'navigation')
+        sm = str(self.get_parameter('start_mode').value).lower()
+        if sm not in ('mapping', 'navigation'):
+            sm = 'navigation'
+        self._system_mode = 'NAVIGATION' if sm == 'navigation' else 'MAPPING'
 
         map_yaml       = os.path.expanduser(self.get_parameter('map_yaml').value)
         waypoints_yaml = os.path.expanduser(self.get_parameter('waypoints_yaml').value)
@@ -144,9 +172,20 @@ class NavNode(Node):
         self._wf_left_vicinity: bool = False      # True once we've moved away from q_hit
         self._wf_start_time: float = 0.0          # monotonic time when wall-follow started
 
-        # Obstacle cooldown: ticks remaining before obstacle check is re-enabled
-        # after a successful live-scan replan (prevents immediate re-trigger).
-        self._obstacle_cooldown: int = 0
+        # ── Local costmap (rolling LiDAR memory) ───────────────────────
+        self._costmap = LocalCostmap(
+            radius_m=self.get_parameter('local_costmap_radius').value,
+            resolution=self._resolution if self._resolution else 0.05,
+            decay_tau=self.get_parameter('local_costmap_decay_tau').value,
+            occ_threshold=self.get_parameter('local_costmap_occ_threshold').value,
+        )
+        self._last_costmap_tick_time: Optional[float] = None
+
+        # Path-validity hysteresis counter (consecutive blocked ticks)
+        self._path_blocked_ticks: int = 0
+
+        # WAITING_FOR_CLEAR bookkeeping
+        self._wait_start_time: float = 0.0
 
         # ── QoS ────────────────────────────────────────────────────────
         reliable_qos = QoSProfile(
@@ -159,6 +198,20 @@ class NavNode(Node):
         self.create_subscription(PoseStamped, '/slam_pose',     self._pose_cb, reliable_qos)
         self.create_subscription(String,      '/goal_waypoint', self._goal_cb, reliable_qos)
         self.create_subscription(LaserScan,   '/scan',          self._scan_cb, qos_profile_sensor_data)
+
+        # /system_mode (latched, transient_local) — dashboard publishes mode
+        mode_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=1,
+        )
+        self.create_subscription(
+            String, '/system_mode', self._system_mode_cb, mode_qos,
+        )
+
+        # Reload waypoints from disk (called by the dashboard after it
+        # writes a new waypoint to waypoints.yaml).
+        self.create_service(Trigger, '~/reload_waypoints', self._reload_waypoints_cb)
 
         # ── Publishers ─────────────────────────────────────────────────
         self._cmd_vel_pub  = self.create_publisher(Twist,       '/cmd_vel',          10)
@@ -184,6 +237,46 @@ class NavNode(Node):
 
     def _scan_cb(self, msg: LaserScan) -> None:
         self._latest_scan = msg
+        # Feed the costmap immediately so the next control tick sees fresh data.
+        if self._pose_x is not None and self._costmap is not None:
+            self._costmap.recenter(self._pose_x, self._pose_y)
+            self._costmap.integrate_scan(
+                msg, self._pose_x, self._pose_y, self._pose_theta
+            )
+
+    def _reload_waypoints_cb(self, request, response):
+        """Re-read waypoints.yaml from disk so newly-added waypoints become
+        addressable without restarting the node.
+        """
+        try:
+            path = os.path.expanduser(self.get_parameter('waypoints_yaml').value)
+            self._waypoints = load_waypoints(path)
+            self.get_logger().info(
+                f'Waypoints reloaded: {list(self._waypoints.keys())}'
+            )
+            self._publish_waypoint_markers()
+            response.success = True
+            response.message = f'{len(self._waypoints)} waypoints loaded'
+        except Exception as exc:
+            response.success = False
+            response.message = f'reload failed: {exc}'
+        return response
+
+    def _system_mode_cb(self, msg: String) -> None:
+        """Track the current system mode; cancel navigation if we leave it."""
+        mode = msg.data.strip().upper()
+        if mode not in ('MAPPING', 'NAVIGATION'):
+            return
+        if mode == self._system_mode:
+            return
+        prev = self._system_mode
+        self._system_mode = mode
+        self.get_logger().info(f'system_mode: {prev} → {mode}')
+        if mode != 'NAVIGATION' and self._state not in (
+            _State.IDLE, _State.ARRIVED
+        ):
+            self.get_logger().info('Cancelling active navigation due to mode change.')
+            self._cancel_navigation()
 
     def _pose_cb(self, msg: PoseStamped) -> None:
         pos = msg.pose.position
@@ -199,6 +292,17 @@ class NavNode(Node):
 
         if name in ('', 'stop'):
             self._cancel_navigation()
+            return
+
+        # Reject goals while system is in MAPPING mode — we don't want the
+        # robot driving around autonomously while the operator is building
+        # a map (could collide with un-mapped obstacles or interfere with SLAM).
+        if self._system_mode != 'NAVIGATION':
+            self.get_logger().warn(
+                f'Goal "{name}" rejected: system_mode={self._system_mode}, '
+                'expected NAVIGATION.'
+            )
+            self._publish_status(f'ERROR: not in navigation mode')
             return
 
         if name not in self._waypoints:
@@ -241,6 +345,7 @@ class NavNode(Node):
         self.get_logger().info(f'Path found: {len(path)} waypoints to "{name}"')
         self._path = path
         self._current_goal_name = name
+        self._path_blocked_ticks = 0
         self._state = _State.FOLLOWING
         self._publish_status(f'FOLLOWING: {name}')
 
@@ -255,7 +360,27 @@ class NavNode(Node):
         if self._pose_x is None:
             return
 
+        # Tick the local costmap (decay + recenter).  This runs in every
+        # state so the costmap stays fresh even while waiting or wall-following.
+        self._tick_costmap()
+
         px, py, theta = self._pose_x, self._pose_y, self._pose_theta
+
+        # ── 360° safety bubble: emergency stop in any active driving state ──
+        active_driving = self._state in (
+            _State.FOLLOWING, _State.RETURNING_LEAVE, _State.WALL_FOLLOWING
+        )
+        if active_driving and self._safety_bubble_violated():
+            self._publish_stop()
+            self.get_logger().warn(
+                'Safety bubble breached — emergency STOP, entering WAITING_FOR_CLEAR'
+            )
+            self._enter_waiting(px, py)
+            return
+
+        if self._state == _State.WAITING_FOR_CLEAR:
+            self._waiting_update(px, py)
+            return
 
         if self._state == _State.WALL_FOLLOWING:
             self._wall_follow_update(px, py)
@@ -286,17 +411,26 @@ class NavNode(Node):
             self._on_arrived()
             return
 
-        if self._obstacle_cooldown > 0:
-            self._obstacle_cooldown -= 1
-        elif self._front_obstacle_detected():
+        # Continuous path validity: scan the next N metres of the planned
+        # path against the rolling costmap.  Hysteresis avoids flapping.
+        if self._path_ahead_blocked(px, py):
+            self._path_blocked_ticks += 1
+        else:
+            self._path_blocked_ticks = 0
+
+        hysteresis = int(self.get_parameter('path_blocked_hysteresis').value)
+        if self._path_blocked_ticks >= hysteresis:
             self._publish_stop()
-            self.get_logger().info('Obstacle detected — replanning with live scan')
+            self.get_logger().info(
+                f'Path blocked for {self._path_blocked_ticks} ticks — replanning'
+            )
+            self._path_blocked_ticks = 0
             if self._replan_from_current(px, py):
-                # Give the robot time to turn away before the next obstacle check.
-                self._obstacle_cooldown = 15  # 1.5 s at 10 Hz
-            else:
-                self.get_logger().warn('Replan failed — entering Bug1 wall follow')
-                self._enter_wall_follow(px, py)
+                return
+            self.get_logger().warn(
+                'Replan failed — entering WAITING_FOR_CLEAR (dynamic-obstacle wait)'
+            )
+            self._enter_waiting(px, py)
             return
 
         lookahead = self.get_parameter('lookahead_distance').value
@@ -343,6 +477,44 @@ class NavNode(Node):
         cmd.linear.x = speed
         cmd.angular.z = omega
         self._cmd_vel_pub.publish(cmd)
+
+    # ------------------------------------------------------------------
+    # WAITING_FOR_CLEAR — pause for a dynamic obstacle before falling back to Bug1
+    # ------------------------------------------------------------------
+
+    def _enter_waiting(self, px: float, py: float) -> None:
+        """Stop the robot and start the wait-for-clear timer."""
+        self._publish_stop()
+        self._wait_start_time = self.get_clock().now().nanoseconds * 1e-9
+        self._path_blocked_ticks = 0
+        self._state = _State.WAITING_FOR_CLEAR
+        self._publish_status(f'WAITING_FOR_CLEAR: {self._current_goal_name}')
+        self.get_logger().info(
+            f'Pausing up to {self.get_parameter("wait_for_clear_timeout").value:.1f} s '
+            'for path to clear before falling back to Bug1.'
+        )
+
+    def _waiting_update(self, px: float, py: float) -> None:
+        """While waiting: retry replan each tick; on success resume, on
+        timeout fall back to Bug1.
+        """
+        self._publish_stop()
+        now = self.get_clock().now().nanoseconds * 1e-9
+        elapsed = now - self._wait_start_time
+        timeout = self.get_parameter('wait_for_clear_timeout').value
+
+        # Only retry replan if the immediate front is reasonably clear, so
+        # we don't spam A* while a person is still inches from the LiDAR.
+        bubble_clear = not self._safety_bubble_violated()
+        if bubble_clear and self._replan_from_current(px, py):
+            self.get_logger().info('Path cleared — resuming FOLLOWING.')
+            return
+
+        if elapsed >= timeout:
+            self.get_logger().warn(
+                f'Wait-for-clear timeout ({timeout:.1f} s) — entering Bug1 wall follow.'
+            )
+            self._enter_wall_follow(px, py)
 
     # ------------------------------------------------------------------
     # Bug1 — wall following (phase 1)
@@ -525,39 +697,155 @@ class NavNode(Node):
         return True
 
     # ------------------------------------------------------------------
-    # Live-scan grid augmentation
+    # Local costmap helpers
     # ------------------------------------------------------------------
+
+    def _tick_costmap(self) -> None:
+        """Recenter on robot pose and apply temporal decay each control tick."""
+        if self._pose_x is None or self._costmap is None:
+            return
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if self._last_costmap_tick_time is None:
+            dt = 1.0 / self.get_parameter('control_rate').value
+        else:
+            dt = max(0.0, now - self._last_costmap_tick_time)
+        self._last_costmap_tick_time = now
+        self._costmap.recenter(self._pose_x, self._pose_y)
+        self._costmap.decay(dt)
 
     def _grid_with_live_scan(self, rx: float, ry: float,
                               rtheta: float) -> np.ndarray:
-        """Return a copy of the static map with current LiDAR hits marked occupied.
+        """Return a copy of the static map with the rolling costmap overlaid.
 
-        This lets A* route around obstacles (like thin rack legs) that the LiDAR
-        can see now but that weren't captured during the original mapping session.
-        Only rays within range_max are used; rays beyond scan.range_max are ignored
-        (open space — no new obstacle to mark).
+        Unlike the old single-frame overlay this uses the decay-filtered
+        local costmap, so transient blips don't poison the global plan and
+        persistent obstacles (rack legs, unexpected boxes) do.
         """
-        scan = self._latest_scan
-        if scan is None or self._grid is None:
+        if self._grid is None:
             return self._grid
+        if self._costmap is None:
+            return self._grid.copy()
 
         augmented = self._grid.copy()
         h, w = augmented.shape
         res = self._resolution
         ox, oy = self._origin_x, self._origin_y
 
-        angle = scan.angle_min
-        for r in scan.ranges:
-            if scan.range_min < r < scan.range_max:
-                wx = rx + r * math.cos(rtheta + angle)
-                wy = ry + r * math.sin(rtheta + angle)
-                cx = int((wx - ox) / res)
-                cy = int((wy - oy) / res)
-                if 0 <= cx < w and 0 <= cy < h:
-                    augmented[cy, cx] = 100
-            angle += scan.angle_increment
+        # Project occupied costmap cells into the global grid.
+        occ = self._costmap.occupied_mask()
+        if not np.any(occ):
+            return augmented
+
+        cm_side = self._costmap.side_cells
+        cm_ox, cm_oy = self._costmap.origin
+        cm_res = self._costmap.resolution
+
+        # Indices of occupied cells in the costmap
+        ys, xs = np.where(occ)
+        # World coords of those cells
+        wxs = cm_ox + (xs + 0.5) * cm_res
+        wys = cm_oy + (ys + 0.5) * cm_res
+        # Map to global grid indices
+        gx = ((wxs - ox) / res).astype(np.int32)
+        gy = ((wys - oy) / res).astype(np.int32)
+        inside = (gx >= 0) & (gx < w) & (gy >= 0) & (gy < h)
+        if np.any(inside):
+            augmented[gy[inside], gx[inside]] = 100
 
         return augmented
+
+    # ------------------------------------------------------------------
+    # Safety bubble (360°)
+    # ------------------------------------------------------------------
+
+    def _safety_bubble_violated(self) -> bool:
+        """True if any scan ray in 360° is closer than safety_bubble_radius."""
+        scan = self._latest_scan
+        if scan is None:
+            return False
+        radius = self.get_parameter('safety_bubble_radius').value
+        for r in scan.ranges:
+            if not math.isfinite(r):
+                continue
+            if scan.range_min < r < radius:
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Continuous path validity check
+    # ------------------------------------------------------------------
+
+    def _path_ahead_blocked(self, px: float, py: float) -> bool:
+        """Return True if the planned path within `path_validity_lookahead`
+        metres ahead crosses any occupied cell in the local costmap.
+        """
+        if not self._path or self._costmap is None:
+            return False
+
+        lookahead = self.get_parameter('path_validity_lookahead').value
+        if lookahead <= 0.0:
+            return False
+
+        # Inflation in costmap cells, derived from inflation_radius parameter.
+        infl_m = self.get_parameter('inflation_radius').value
+        infl_cells = max(0, int(round(infl_m / self._costmap.resolution)))
+
+        # Find the closest point on the path to the robot, then walk forward
+        # along the path until we've covered `lookahead` metres.
+        # Use the same projection logic as _find_lookahead but accumulate
+        # segments and bresenham-test each one.
+        best_seg = 0
+        best_t = 0.0
+        best_d2 = math.inf
+        for i in range(len(self._path) - 1):
+            ax, ay = self._path[i]
+            bx, by = self._path[i + 1]
+            dx, dy = bx - ax, by - ay
+            seg_len2 = dx * dx + dy * dy
+            if seg_len2 < 1e-9:
+                continue
+            t = ((px - ax) * dx + (py - ay) * dy) / seg_len2
+            t = max(0.0, min(1.0, t))
+            cx, cy = ax + t * dx, ay + t * dy
+            d2 = (cx - px) ** 2 + (cy - py) ** 2
+            if d2 < best_d2:
+                best_d2 = d2
+                best_seg = i
+                best_t = t
+
+        ax, ay = self._path[best_seg]
+        bx, by = self._path[best_seg + 1] if best_seg + 1 < len(self._path) else self._path[best_seg]
+        cur_x = ax + best_t * (bx - ax)
+        cur_y = ay + best_t * (by - ay)
+
+        remaining = lookahead
+        i = best_seg
+        while remaining > 0.0 and i < len(self._path) - 1:
+            nx, ny = self._path[i + 1]
+            seg_len = math.hypot(nx - cur_x, ny - cur_y)
+            if seg_len < 1e-6:
+                i += 1
+                continue
+
+            if seg_len <= remaining:
+                end_x, end_y = nx, ny
+                step = seg_len
+            else:
+                frac = remaining / seg_len
+                end_x = cur_x + frac * (nx - cur_x)
+                end_y = cur_y + frac * (ny - cur_y)
+                step = remaining
+
+            if self._costmap.segment_blocked(
+                cur_x, cur_y, end_x, end_y, inflation_cells=infl_cells
+            ):
+                return True
+
+            cur_x, cur_y = end_x, end_y
+            remaining -= step
+            i += 1
+
+        return False
 
     # ------------------------------------------------------------------
     # Pure pursuit helpers
@@ -712,6 +1000,7 @@ class NavNode(Node):
         self._path = []
         self._state = _State.IDLE
         self._current_goal_name = ''
+        self._path_blocked_ticks = 0
         self._publish_status('IDLE')
         self.get_logger().info('Navigation cancelled.')
 

@@ -34,6 +34,25 @@ nav_node:
     obstacle_angle_deg: 55.0  # half-angle of front arc (deg)
     wall_follow_dist: 0.45    # target lateral distance from wall while circumnavigating (m)
 
+    # ── Local costmap (rolling LiDAR memory) ──────────────────────────
+    # Lets the robot remember recent LiDAR hits over a short horizon so
+    # transient noise decays away but persistent obstacles stay marked.
+    local_costmap_radius:        2.0   # m — half side of the patch around the robot
+    local_costmap_decay_tau:     0.7   # s — exponential decay time constant
+    local_costmap_occ_threshold: 0.4   # cell score above which a cell counts as occupied
+
+    # ── Continuous path validity check ────────────────────────────────
+    path_validity_lookahead:     3.0   # m of path ahead validated each tick
+    path_blocked_hysteresis:     3     # consecutive blocked ticks needed to replan
+
+    # ── 360° safety bubble (emergency STOP) ───────────────────────────
+    safety_bubble_radius:        0.25  # m — any scan hit closer than this halts the robot
+
+    # ── Dynamic-obstacle wait policy ──────────────────────────────────
+    # When replan fails, wait this long (retrying replan) before falling
+    # back to Bug1 wall-following.  Useful for slow-moving people/robots.
+    wait_for_clear_timeout:      5.0   # s
+
 # Legacy navigation_node parameters (kept for backward compatibility)
 navigation_node:
   ros__parameters:

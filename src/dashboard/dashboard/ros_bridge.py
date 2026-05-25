@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import (
+    QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy,
+)
 
 
 @dataclass
@@ -27,6 +29,7 @@ class RobotState:
     lifter_level: int = 0
     scan: Optional[dict] = None
     nav_plan: Optional[list] = None
+    system_mode: str = "NAVIGATION"
 
 
 class RosBridge:
@@ -96,9 +99,45 @@ class RosBridge:
         self._cmd_vel_pub = self._node.create_publisher(Twist, "/cmd_vel", reliable_qos)
         self._voice_pub = self._node.create_publisher(String, "/voice_command", reliable_qos)
 
+        # /system_mode is latched (transient_local) so late subscribers see the
+        # current mode immediately.
+        mode_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self._mode_pub = self._node.create_publisher(String, "/system_mode", mode_qos)
+        # Echo back so we keep state.system_mode in sync (in case another node
+        # publishes too).
+        self._node.create_subscription(
+            String, "/system_mode", self._cb_system_mode, mode_qos
+        )
+
+        # Service clients for slam_node (~/save_map, ~/reset_map) and nav_node
+        # (~/reload_waypoints).  They're created here but called lazily so the
+        # dashboard works even if those services aren't up yet.
+        from std_srvs.srv import Trigger
+        self._save_map_cli   = self._node.create_client(Trigger, '/map_saver/save_map')
+        self._reset_map_cli  = self._node.create_client(Trigger, '/slam_node/reset_map')
+        self._reload_wps_cli = self._node.create_client(Trigger, '/nav_node/reload_waypoints')
+
         # Load waypoints and static map from file at startup
         self._load_waypoints()
         self._load_static_map()
+
+        # Publish the initial system mode (read by app.py via set_system_mode).
+        # Default is NAVIGATION — the launch file overrides this through the
+        # `start_mode` parameter on the dashboard node.
+        initial_mode = "NAVIGATION"
+        try:
+            self._node.declare_parameter('start_mode', 'navigation')
+            sm = str(self._node.get_parameter('start_mode').value).lower()
+            if sm == 'mapping':
+                initial_mode = 'MAPPING'
+        except Exception:
+            pass
+        self.publish_system_mode(initial_mode)
 
     # ------------------------------------------------------------------
     # Waypoints loading
@@ -194,6 +233,86 @@ class RosBridge:
                 yaml.dump({"waypoints": snapshot}, f, default_flow_style=False)
         except Exception as exc:  # noqa: BLE001
             self._node.get_logger().warning(f"Could not save waypoints: {exc}")
+        # Tell nav_node to reload waypoints so the new one is immediately
+        # selectable as a goal.
+        self.call_reload_waypoints()
+
+    def delete_waypoint(self, name: str) -> bool:
+        """Remove a waypoint and persist to disk.  Returns True if removed."""
+        import yaml
+        with self._lock:
+            if name not in self._waypoints:
+                return False
+            del self._waypoints[name]
+            snapshot = dict(self._waypoints)
+        waypoints_path = os.path.expanduser("~/ros2_maps/waypoints.yaml")
+        try:
+            with open(waypoints_path, "w") as f:
+                yaml.dump({"waypoints": snapshot}, f, default_flow_style=False)
+        except Exception as exc:  # noqa: BLE001
+            self._node.get_logger().warning(f"Could not save waypoints: {exc}")
+        self.call_reload_waypoints()
+        return True
+
+    # ------------------------------------------------------------------
+    # System mode + slam services
+    # ------------------------------------------------------------------
+
+    def publish_system_mode(self, mode: str) -> None:
+        """Publish /system_mode with a latched QoS so late subscribers see it."""
+        from std_msgs.msg import String
+        mode = mode.strip().upper()
+        if mode not in ('MAPPING', 'NAVIGATION'):
+            self._node.get_logger().warning(f"Refusing to publish invalid mode {mode}")
+            return
+        msg = String()
+        msg.data = mode
+        self._mode_pub.publish(msg)
+        with self._lock:
+            self._state.system_mode = mode
+        self._node.get_logger().info(f"/system_mode published: {mode}")
+
+    def get_system_mode(self) -> str:
+        with self._lock:
+            return self._state.system_mode
+
+    def _call_trigger(self, client, name: str, timeout: float = 2.0) -> tuple[bool, str]:
+        """Call a Trigger-typed service, blocking up to `timeout` seconds."""
+        from std_srvs.srv import Trigger
+        if not client.wait_for_service(timeout_sec=timeout):
+            return False, f"{name}: service not available"
+        req = Trigger.Request()
+        future = client.call_async(req)
+        # Spin briefly waiting for the response.  We're already on the executor
+        # thread for some callers, so use the executor's spin_until_future_complete.
+        import time
+        t0 = time.monotonic()
+        while not future.done() and (time.monotonic() - t0) < timeout:
+            time.sleep(0.05)
+        if not future.done():
+            return False, f"{name}: timed out after {timeout:.1f}s"
+        try:
+            resp = future.result()
+        except Exception as exc:
+            return False, f"{name}: {exc}"
+        return bool(resp.success), resp.message or ''
+
+    def call_save_map(self) -> tuple[bool, str]:
+        return self._call_trigger(self._save_map_cli, 'save_map', timeout=5.0)
+
+    def call_reset_map(self) -> tuple[bool, str]:
+        return self._call_trigger(self._reset_map_cli, 'reset_map', timeout=2.0)
+
+    def call_reload_waypoints(self) -> tuple[bool, str]:
+        return self._call_trigger(self._reload_wps_cli, 'reload_waypoints', timeout=2.0)
+
+    # ------------------------------------------------------------------
+    # System mode callback
+    # ------------------------------------------------------------------
+
+    def _cb_system_mode(self, msg) -> None:
+        with self._lock:
+            self._state.system_mode = msg.data.strip().upper()
 
     # ------------------------------------------------------------------
     # ROS2 callbacks (executor thread)

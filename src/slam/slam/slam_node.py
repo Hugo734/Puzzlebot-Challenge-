@@ -20,6 +20,8 @@ _qos_scan = QoSProfile(
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry, OccupancyGrid as OccupancyGridMsg
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformStamped
+from std_msgs.msg import String as StringMsg
+from std_srvs.srv import Trigger
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 from rclpy.time import Time
@@ -202,6 +204,9 @@ class SLAMNode(Node):
         self.declare_parameter('initial_x',       0.0)
         self.declare_parameter('initial_y',       0.0)
         self.declare_parameter('initial_theta',   0.0)
+        # Initial mode: 'mapping' (write to grid) | 'navigation' (frozen)
+        # Overridden at runtime by /system_mode subscription.
+        self.declare_parameter('start_mode',      'navigation')
 
         # ── Parameters: scan / map gating ─────────────────────────
         self.declare_parameter('range_min',          0.12)
@@ -252,17 +257,25 @@ class SLAMNode(Node):
         )
         self._auto_localize_tries = 0
 
-        # Localization mode: a preloaded map means we should
+        # Localization mode controls two things:
         #   (a) run the matcher on EVERY scan, not just keyframes,
-        #       because the loaded map is fixed and continuous matching
-        #       is what keeps the LiDAR readings aligned during motion;
+        #       because in localization the saved map is fixed and
+        #       continuous matching keeps the LiDAR aligned during motion;
         #   (b) freeze the map — don't let new observations modify it,
         #       which would smear the carefully-built saved map.
-        self._localization_mode = bool(map_yaml)
-        if self._localization_mode:
-            self.get_logger().info(
-                'Localization mode active: keyframe_mode disabled, '
-                'map updates frozen (using saved map as ground truth).')
+        #
+        # Initial value follows the `start_mode` parameter, but the node
+        # also subscribes to /system_mode to switch at runtime.  A
+        # preloaded map biases the default toward localization.
+        start_mode = str(self.get_parameter('start_mode').value).lower()
+        if start_mode not in ('mapping', 'navigation'):
+            self.get_logger().warn(
+                f'Unknown start_mode "{start_mode}" — defaulting to navigation')
+            start_mode = 'navigation'
+        self._localization_mode = (start_mode == 'navigation')
+        self.get_logger().info(
+            f'SLAM start mode: {start_mode.upper()} '
+            f'(localization_mode={self._localization_mode})')
 
         # ── State: SLAM / odom poses ──────────────────────────────
         self._sx = self.get_parameter('initial_x').value
@@ -335,6 +348,25 @@ class SLAMNode(Node):
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose',
                                  self._initialpose_cb, 10,
                                  callback_group=self._main_cbg)
+
+        # /system_mode (latched): runtime switch between MAPPING and NAVIGATION.
+        _qos_mode = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.create_subscription(
+            StringMsg, '/system_mode', self._system_mode_cb, _qos_mode,
+            callback_group=self._main_cbg,
+        )
+
+        # Service: clear the occupancy grid (used when the dashboard asks for
+        # a fresh map after switching NAVIGATION → MAPPING).
+        self.create_service(
+            Trigger, '~/reset_map', self._reset_map_cb,
+            callback_group=self._main_cbg,
+        )
 
         if not _HAS_KDTREE:
             self.get_logger().warn(
@@ -424,6 +456,42 @@ class SLAMNode(Node):
         # If a manual estimate arrives, treat auto-localize as resolved.
         self._auto_localize_pending = False
         self._set_pose(float(p.x), float(p.y), theta)
+
+    def _system_mode_cb(self, msg: StringMsg) -> None:
+        """Switch between MAPPING (writes the grid) and NAVIGATION (frozen)."""
+        mode = msg.data.strip().upper()
+        if mode not in ('MAPPING', 'NAVIGATION'):
+            self.get_logger().warn(f'Ignoring unknown /system_mode: "{mode}"')
+            return
+        new_loc = (mode == 'NAVIGATION')
+        if new_loc == self._localization_mode:
+            return
+        self._localization_mode = new_loc
+        if new_loc:
+            self.get_logger().info(
+                'Switched to NAVIGATION: map frozen, matcher runs every scan.'
+            )
+        else:
+            self.get_logger().info(
+                'Switched to MAPPING: grid updates re-enabled.'
+            )
+
+    def _reset_map_cb(self, request, response):
+        """Clear the occupancy grid back to "unknown" (used by the dashboard
+        when the user chose to start mapping from scratch).
+        """
+        try:
+            self.grid._log[:] = 0.0
+            self._last_map_x = 0.0
+            self._last_map_y = 0.0
+            self._last_map_theta = 0.0
+            self.get_logger().info('Occupancy grid reset to empty (unknown).')
+            response.success = True
+            response.message = 'grid cleared'
+        except Exception as exc:
+            response.success = False
+            response.message = f'reset failed: {exc}'
+        return response
 
     def _try_auto_localize(self, cloud) -> bool:
         """

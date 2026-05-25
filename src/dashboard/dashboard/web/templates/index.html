@@ -18,10 +18,41 @@
       </div>
     </div>
     <div class="header-status">
+      <div class="mode-switch" id="modeSwitch" title="Switch system mode">
+        <button class="mode-btn" data-mode="MAPPING" id="modeBtnMapping">MAP</button>
+        <button class="mode-btn active" data-mode="NAVIGATION" id="modeBtnNav">NAV</button>
+      </div>
+      <button class="map-btn save-map-btn hidden" id="btnSaveMap" title="Save current SLAM map to disk">
+        &#128190; Save Map
+      </button>
       <span class="conn-dot" id="connDot"></span>
       <span class="conn-label" id="connLabel">Connecting…</span>
     </div>
   </header>
+
+  <!-- ================================================================
+       MAP RESET CONFIRM DIALOG (NAV → MAP)
+       ================================================================ -->
+  <div id="mapResetDialog" class="wp-popup hidden">
+    <div class="wp-popup-box">
+      <h3 class="wp-popup-title">Switch to Mapping</h3>
+      <p style="margin:0 0 14px 0">
+        Switching to MAPPING mode lets SLAM update the occupancy grid.
+        How do you want to start?
+      </p>
+      <div class="wp-popup-actions" style="flex-direction:column;gap:8px">
+        <button class="btn-submit" id="btnModeContinueMap">
+          Continue from current map
+        </button>
+        <button class="btn-cancel" id="btnModeResetMap">
+          Start from empty grid
+        </button>
+        <button class="btn-cancel" id="btnModeCancelSwitch" style="opacity:0.6">
+          Cancel
+        </button>
+      </div>
+    </div>
+  </div>
 
   <main class="grid">
 
