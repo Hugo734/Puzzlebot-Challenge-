@@ -15,10 +15,37 @@ from voice_control.hmm_utils import (
     PALABRAS, FS, extract_mfcc, quantize, HMMBakis,
 )
 
-_DEFAULT_MODELS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    'models',
-)
+
+def _default_models_dir() -> str:
+    """Locate the models directory across install/source layouts.
+
+    Order:
+      1. ament_index share dir (works after `colcon build` for installed pkg)
+      2. Source tree relative to this file (works in editable/dev layouts)
+    Returns the first existing directory, or the ament path as a last resort
+    (so callers see a sensible error message).
+    """
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        share = os.path.join(get_package_share_directory('voice_control'), 'models')
+        if os.path.exists(share):
+            return share
+    except Exception:
+        share = None
+
+    # Walk up from this file: voice_control/voice_control/hmm_recognizer.py
+    # → voice_control/models  (source tree)
+    src_models = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'models',
+    )
+    if os.path.exists(src_models):
+        return src_models
+
+    return share or src_models
+
+
+_DEFAULT_MODELS_DIR = _default_models_dir()
 
 
 class HMMRecognizer:

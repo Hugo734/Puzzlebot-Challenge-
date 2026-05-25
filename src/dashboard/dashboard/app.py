@@ -57,17 +57,8 @@ def _get_hmm_recognizer():
             r = HMMRecognizer()
             if r.load():
                 _hmm_recognizer = r
-            else:
-                # Try source tree path as fallback
-                src_models = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)),
-                    '..', '..', '..', 'voice_control', 'models',
-                )
-                r2 = HMMRecognizer(models_dir=os.path.normpath(src_models))
-                if r2.load():
-                    _hmm_recognizer = r2
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            print(f'[dashboard] HMM recognizer load failed: {exc}')
     return _hmm_recognizer
 
 # ---------------------------------------------------------------------------
