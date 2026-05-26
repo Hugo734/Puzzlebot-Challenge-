@@ -662,15 +662,21 @@ class QRAlignmentNode(Node):
         self._publish_cmd(v, w)
 
     # ------------------------------------------------------------------
+    # Hard safety caps (no se pueden superar via parametros)
+    _HARD_V_MAX = 0.10
+    _HARD_W_MAX = 0.19
+
     def _publish_cmd(self, v: float, w: float) -> None:
         if self._dry_run:
             return
+        v_safe = max(-self._HARD_V_MAX, min(self._HARD_V_MAX, float(v)))
+        w_safe = max(-self._HARD_W_MAX, min(self._HARD_W_MAX, float(w)))
         t = Twist()
-        t.linear.x = float(v)
-        t.angular.z = float(w)
+        t.linear.x = v_safe
+        t.angular.z = w_safe
         self._pub_cmd.publish(t)
         self.get_logger().info(
-            f'cmd_vel v={v:+.3f} w={w:+.3f}  [{self._state.value}]',
+            f'cmd_vel v={v_safe:+.3f} w={w_safe:+.3f}  [{self._state.value}]',
             throttle_duration_sec=0.5,
         )
 
