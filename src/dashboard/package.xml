@@ -19,6 +19,10 @@
 
   <exec_depend>python3-flask</exec_depend>
   <exec_depend>python3-flask-socketio</exec_depend>
+  <!-- pydub + ffmpeg let the /api/voice endpoint decode WebM/Opus blobs that
+       browsers' MediaRecorder produces by default. -->
+  <exec_depend>python3-pydub</exec_depend>
+  <exec_depend>ffmpeg</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
