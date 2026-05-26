@@ -394,6 +394,8 @@ class NavNode(Node):
             self._returning_leave_update(px, py, theta)
             return
 
+        if self._state == _State.IDLE:
+            return  # yield control to teleop / other nodes
         if self._state != _State.FOLLOWING:
             self._publish_stop()
             return

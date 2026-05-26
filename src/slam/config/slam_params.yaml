@@ -155,8 +155,10 @@ slam_node:
     # damps per-scan jitter but introduces a lag during fast
     # rotations: because odom→base_footprint updates immediately
     # while map→odom lags, RViz sees the lidar scan rotating
-    # relative to the map.  1.0 = no smoothing (default).
-    tf_smoothing_alpha: 1.0
+    # relative to the map.  1.0 = no smoothing.
+    # 0.3 gives stable RViz visualization without hurting map quality
+    # (the map integrates at the raw SLAM pose, not the smoothed TF).
+    tf_smoothing_alpha: 0.3
 
     # ── Initial map orientation ──────────────────────────────────
     # Rotate the map frame at startup so the room appears axis-

@@ -540,6 +540,12 @@ class SLAMNode(Node):
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         self._odom_buf.append((t, self._ox, self._oy, self._otheta))
 
+        # Republish slam_pose at odom rate (20 Hz) so the RViz arrow
+        # tracks the robot model between scan callbacks.
+        if self._tf_initialised:
+            self._propagate_from_odom()
+            self._publish_pose(msg.header.stamp)
+
     def _odom_at(self, t_query):
         """Linearly interpolate odom pose at ROS time `t_query` (float seconds)."""
         if not self._odom_buf:

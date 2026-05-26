@@ -28,14 +28,16 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def launch_setup(context, *args, **kwargs):
-    mode = LaunchConfiguration('mode').perform(context)
+    mode      = LaunchConfiguration('mode').perform(context)
+    open_rviz = LaunchConfiguration('open_rviz').perform(context) == 'true'
+    use_icp   = LaunchConfiguration('use_icp').perform(context) == 'true'
 
     pkg  = get_package_share_directory('localization')
     pkg_desc = get_package_share_directory('description')
 
     params     = os.path.join(pkg, 'config', 'ekf_params.yaml')
     rviz_cfg   = os.path.join(pkg, 'config', 'ekf.rviz')
-    urdf_path  = os.path.join(pkg_desc, 'urdf', 'puzzlebot_mcr2.urdf.xacro')
+    urdf_path  = os.path.join(pkg_desc, 'urdf', 'puzzlebot_with_lifter.urdf.xacro')
 
     robot_description = ParameterValue(
         Command(['xacro ', urdf_path, ' is_sim:=false is_ignition:=false']),
@@ -98,15 +100,18 @@ def launch_setup(context, *args, **kwargs):
             parameters=[params],
             output='screen',
         )
-        return [
+        nodes = [
             kinematic_simulator,
             ekf_node,
-            icp_node,
             robot_state_publisher,
             joint_state_publisher,
-            rviz,
             teleop,
         ]
+        if use_icp:
+            nodes.append(icp_node)
+        if open_rviz:
+            nodes.append(rviz)
+        return nodes
 
     # mode == 'real'
     velocity_bridge = Node(
@@ -115,11 +120,17 @@ def launch_setup(context, *args, **kwargs):
         name='velocity_bridge',
         output='screen',
     )
-    return [
+    nodes = [
         velocity_bridge,
         ekf_node,
-        icp_node,
+        robot_state_publisher,
+        joint_state_publisher,
     ]
+    if use_icp:
+        nodes.append(icp_node)
+    if open_rviz:
+        nodes.append(rviz)
+    return nodes
 
 
 def generate_launch_description():
@@ -128,6 +139,17 @@ def generate_launch_description():
             'mode',
             default_value='sim',
             description='"sim" uses kinematic_simulator | "real" uses velocity_bridge',
+        ),
+        DeclareLaunchArgument(
+            'open_rviz',
+            default_value='true',
+            description='Open RViz2 (set false when included from a parent launch)',
+        ),
+        DeclareLaunchArgument(
+            'use_icp',
+            default_value='true',
+            description='Launch icp_node for scan-to-scan correction. '
+                        'Set false when slam_node is running (it handles ICP internally).',
         ),
         OpaqueFunction(function=launch_setup),
     ])
