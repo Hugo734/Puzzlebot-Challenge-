@@ -39,6 +39,9 @@ setup(
     entry_points={
         'console_scripts': [
             'alignment_node = perception.alignment_node:main',
+            'camera_calibration = perception.camera_calibration:main',
+            'qr_pose_viewer = perception.qr_pose_viewer:main',
+            'qr_alignment = perception.qr_alignment:main',
         ],
     },
 )
