@@ -150,7 +150,7 @@ class NavigationNode(Node):
         )
 
         # ── Publishers ────────────────────────────────────────────────
-        self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel_in', 10)
         self._status_pub = self.create_publisher(String, '/navigation/status', 10)
 
         # ── Control timer ─────────────────────────────────────────────

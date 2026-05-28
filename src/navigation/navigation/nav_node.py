@@ -214,7 +214,7 @@ class NavNode(Node):
         self.create_service(Trigger, '~/reload_waypoints', self._reload_waypoints_cb)
 
         # ── Publishers ─────────────────────────────────────────────────
-        self._cmd_vel_pub  = self.create_publisher(Twist,       '/cmd_vel',          10)
+        self._cmd_vel_pub  = self.create_publisher(Twist,       '/cmd_vel_in',       10)
         self._plan_pub     = self.create_publisher(Path,        '/plan',             10)
         self._status_pub   = self.create_publisher(String,      '/nav_status',       10)
         self._walls_pub    = self.create_publisher(PointCloud2, '/map_walls',         1)

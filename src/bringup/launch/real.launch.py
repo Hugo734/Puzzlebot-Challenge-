@@ -4,7 +4,10 @@ real.launch.py — Single-command real-robot stack for the Puzzlebot AMR
 
 Brings up everything needed on hardware:
 
-  * Real-robot controller (real_odom + twist_relay)
+  * Real-robot controller (real_odom + vel_smoother)
+      vel_smoother ramps /cmd_vel_in → /cmd_vel so the powerbank does not
+      brown out the hackerboard on velocity steps.  All upstream nodes
+      must publish to /cmd_vel_in (already wired in nav/perception/dashboard).
   * EKF localization (mode=real → velocity_bridge + ekf + icp + RSP)
   * SLAM (slam_node) with runtime MAPPING ↔ NAVIGATION mode switching
   * map_saver_node — `/map_saver/save_map` Trigger service

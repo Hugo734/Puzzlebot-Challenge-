@@ -82,11 +82,16 @@ def generate_launch_description():
         ],
     )
 
-    # Twist relay (converts Twist -> TwistStamped)
+    # Velocity smoother: rate-limits acceleration before forwarding to hardware
     twist_relay_node = Node(
         package="controller",
         executable="twist_relay",
-        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
+        parameters=[{
+            "use_sim_time":       LaunchConfiguration("use_sim_time"),
+            "max_linear_accel":   0.3,   # m/s²  — tune to avoid current spikes
+            "max_angular_accel":  0.5,   # rad/s²
+            "rate":              50.0,   # Hz
+        }],
         condition=IfCondition(use_simple_controller),
     )
 

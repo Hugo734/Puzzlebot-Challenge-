@@ -96,7 +96,7 @@ class RosBridge:
 
         self._mission_pub = self._node.create_publisher(String, "/mission", reliable_qos)
         self._goal_pub = self._node.create_publisher(String, "/goal_waypoint", reliable_qos)
-        self._cmd_vel_pub = self._node.create_publisher(Twist, "/cmd_vel", reliable_qos)
+        self._cmd_vel_pub = self._node.create_publisher(Twist, "/cmd_vel_in", reliable_qos)
         self._voice_pub = self._node.create_publisher(String, "/voice_command", reliable_qos)
 
         # /system_mode is latched (transient_local) so late subscribers see the
