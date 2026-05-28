@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 
 
@@ -38,6 +40,81 @@ class OccupancyGrid:
 
         self.origin_x = -(width  * resolution) / 2.0
         self.origin_y = -(height * resolution) / 2.0
+
+        # Workspace mask: optional ROTATED rectangle in world coords.
+        # When enabled, integration ignores scan endpoints outside the
+        # rectangle and `scrub_outside_workspace()` zeros any log-odds
+        # that leaked outside.  Use for bounded known-size environments
+        # so phantom LiDAR returns past doors/windows can't pollute the
+        # map.  Set via either:
+        #   - set_workspace_aligned(xmin, xmax, ymin, ymax) — axis aligned
+        #   - set_workspace_rotated(cx, cy, sx, sy, theta) — generic
+        self._ws_enabled: bool = False
+        self._ws_cx: float = 0.0
+        self._ws_cy: float = 0.0
+        self._ws_half_sx: float = 0.0
+        self._ws_half_sy: float = 0.0
+        self._ws_cos: float = 1.0
+        self._ws_sin: float = 0.0
+
+    def set_workspace_aligned(self, xmin: float, xmax: float,
+                               ymin: float, ymax: float) -> None:
+        """Enable workspace masking with an axis-aligned bounds box."""
+        self._ws_cx = 0.5 * (xmin + xmax)
+        self._ws_cy = 0.5 * (ymin + ymax)
+        self._ws_half_sx = 0.5 * (xmax - xmin)
+        self._ws_half_sy = 0.5 * (ymax - ymin)
+        self._ws_cos = 1.0
+        self._ws_sin = 0.0
+        self._ws_enabled = True
+
+    def set_workspace_rotated(self, cx: float, cy: float,
+                               sx: float, sy: float, theta: float) -> None:
+        """Enable workspace masking with a rotated rectangle centred at
+        (cx, cy), full size (sx, sy), CCW rotation theta (rad)."""
+        self._ws_cx = float(cx)
+        self._ws_cy = float(cy)
+        self._ws_half_sx = 0.5 * float(sx)
+        self._ws_half_sy = 0.5 * float(sy)
+        self._ws_cos = math.cos(float(theta))
+        self._ws_sin = math.sin(float(theta))
+        self._ws_enabled = True
+
+    def disable_workspace(self) -> None:
+        self._ws_enabled = False
+
+    def workspace_params(self):
+        """Return (enabled, cx, cy, sx, sy, theta_rad)."""
+        if not self._ws_enabled:
+            return (False, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return (True, self._ws_cx, self._ws_cy,
+                2.0 * self._ws_half_sx, 2.0 * self._ws_half_sy,
+                math.atan2(self._ws_sin, self._ws_cos))
+
+    def _points_inside_workspace(self, xs, ys):
+        """Vectorised "inside rectangle" check for arrays xs, ys."""
+        # Translate to rectangle frame
+        dx = xs - self._ws_cx
+        dy = ys - self._ws_cy
+        # Rotate by -theta so the rectangle is axis-aligned
+        lx =  self._ws_cos * dx + self._ws_sin * dy
+        ly = -self._ws_sin * dx + self._ws_cos * dy
+        return (np.abs(lx) <= self._ws_half_sx) & (np.abs(ly) <= self._ws_half_sy)
+
+    def scrub_outside_workspace(self) -> int:
+        """Zero log-odds for any cell whose CENTRE is outside the
+        workspace rectangle.  Returns the number of cells zeroed.
+        No-op if masking is disabled."""
+        if not self._ws_enabled:
+            return 0
+        xs = self.origin_x + (np.arange(self.width)  + 0.5) * self.resolution
+        ys = self.origin_y + (np.arange(self.height) + 0.5) * self.resolution
+        X, Y = np.meshgrid(xs, ys)
+        inside = self._points_inside_workspace(X, Y)
+        outside = ~inside
+        n_zeroed = int(np.count_nonzero(outside & (self._log != 0.0)))
+        self._log[outside] = 0.0
+        return n_zeroed
 
     # ------------------------------------------------------------------
     # Coordinate helpers
@@ -202,12 +279,25 @@ class OccupancyGrid:
         counts_free = np.bincount(flat_free, minlength=self.width * self.height)
         self._log += counts_free.reshape(self.height, self.width) * self.l_free
 
+        # ── Workspace mask: drop endpoints outside the known boundary.
+        # Stops e.g. rays passing through a door / glass from being
+        # integrated as walls beyond the actual room.  Applied to the
+        # OCCUPIED update only — free-rays inside the workspace can
+        # still cross outside cells; those are then scrubbed back to
+        # unknown by scrub_outside_workspace().
+        if self._ws_enabled:
+            ep_inside_ws = self._points_inside_workspace(ex, ey)
+        else:
+            ep_inside_ws = None
+
         # ── Occupied-cell update ────────────────────────────────────────
         occ = (
             hit &
             (ex_c >= 0) & (ex_c < self.width) &
             (ey_c >= 0) & (ey_c < self.height)
         )
+        if ep_inside_ws is not None:
+            occ = occ & ep_inside_ws
         if occ.any():
             flat_occ = ey_c[occ] * self.width + ex_c[occ]
             counts_occ = np.bincount(flat_occ, minlength=self.width * self.height)

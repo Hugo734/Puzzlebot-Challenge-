@@ -88,6 +88,22 @@ class SLAMNode(Node):
         self.declare_parameter('resolution',         0.05)
         self.declare_parameter('map_width',          400)
         self.declare_parameter('map_height',         400)
+
+        # ── Workspace mask (known-environment prior) ─────────────
+        # Drop scan endpoints outside a known rectangle and periodically
+        # scrub cells outside it.  Defaults sized for the user's
+        # 4.86 × 3.76 m test track; tune in slam_params.yaml.
+        self.declare_parameter('workspace_enabled',  True)
+        self.declare_parameter('workspace_center_x', 0.0)
+        self.declare_parameter('workspace_center_y', 0.0)
+        self.declare_parameter('workspace_size_x',   4.86)
+        self.declare_parameter('workspace_size_y',   3.76)
+        # Extra margin around the rectangle (in metres).  Gives slack
+        # for slight pose drift / starting-position offset so we don't
+        # accidentally crop real walls.
+        self.declare_parameter('workspace_pad',      0.40)
+        # Run scrub_outside_workspace every N map publishes.
+        self.declare_parameter('workspace_scrub_every', 5)
         self.declare_parameter('l_occ',              0.85)
         self.declare_parameter('l_free',            -0.40)
         self.declare_parameter('l_min',             -5.0)
@@ -289,6 +305,32 @@ class SLAMNode(Node):
             occupied_stop=occ_stop,
         )
 
+        # ── Workspace mask ────────────────────────────────────────
+        # Known-environment prior: nothing real lies outside the
+        # operating room.  Anything the LiDAR reports outside this box
+        # is dropped at integration, and `scrub_outside_workspace` zeros
+        # any cell that already leaked outside.  Set workspace_enabled
+        # to false to disable (e.g. open environments).
+        if bool(self.get_parameter('workspace_enabled').value):
+            cx_ws = float(self.get_parameter('workspace_center_x').value)
+            cy_ws = float(self.get_parameter('workspace_center_y').value)
+            sx_ws = float(self.get_parameter('workspace_size_x').value)
+            sy_ws = float(self.get_parameter('workspace_size_y').value)
+            pad   = float(self.get_parameter('workspace_pad').value)
+            self.grid.set_workspace_aligned(
+                cx_ws - sx_ws / 2.0 - pad,
+                cx_ws + sx_ws / 2.0 + pad,
+                cy_ws - sy_ws / 2.0 - pad,
+                cy_ws + sy_ws / 2.0 + pad,
+            )
+            self.get_logger().info(
+                f'Workspace mask: x∈[{cx_ws - sx_ws/2 - pad:.2f}, '
+                f'{cx_ws + sx_ws/2 + pad:.2f}] m, '
+                f'y∈[{cy_ws - sy_ws/2 - pad:.2f}, '
+                f'{cy_ws + sy_ws/2 + pad:.2f}] m  '
+                f'(size={sx_ws}×{sy_ws} m, pad={pad} m)'
+            )
+
         # ── Load saved map into grid (localization mode) ─────────
         map_yaml = self.get_parameter('map_yaml').value
         if map_yaml:
@@ -458,6 +500,16 @@ class SLAMNode(Node):
             callback_group=self._main_cbg,
         )
 
+        # Service: auto-fit the workspace rectangle to the currently-mapped
+        # walls and lock it as the integration mask.  Dashboard exposes
+        # this as the "Fit Workspace" button — call once the three outer
+        # walls are visible in the map.  Knows the room dimensions from
+        # workspace_size_{x,y} and snaps to the best (centre, rotation).
+        self.create_service(
+            Trigger, '~/auto_fit_workspace', self._auto_fit_workspace_cb,
+            callback_group=self._main_cbg,
+        )
+
         if not _HAS_KDTREE:
             self.get_logger().warn(
                 'scipy.spatial.cKDTree NOT available — falling back to '
@@ -599,6 +651,86 @@ class SLAMNode(Node):
         except Exception as exc:
             response.success = False
             response.message = f'relocalize failed: {exc}'
+        return response
+
+    def _auto_fit_workspace_cb(self, request, response):
+        """Auto-detect the room rectangle and lock the workspace mask.
+
+        Knows the room is ``workspace_size_x × workspace_size_y`` and
+        searches for the (centre, rotation) that best fits a rectangle
+        of that size to the currently-mapped walls.  Tries the long axis
+        along X and along Y, so the user can start the robot in either
+        orientation.  Uses 2nd/98th percentile bounds for robustness
+        against the few stray cells that don't belong to a wall.
+
+        On success: locks the rotated workspace into the grid, runs an
+        immediate scrub.  On failure (not enough walls yet) returns a
+        descriptive message and changes nothing.
+        """
+        try:
+            log = self.grid._log
+            thresh = self.grid.display_l_occ
+            occ_mask = log >= thresh
+            n_occ = int(np.count_nonzero(occ_mask))
+            if n_occ < 100:
+                response.success = False
+                response.message = (
+                    f'not enough mapped walls yet ({n_occ} cells ≥ '
+                    f'{thresh:.1f}); explore more then try again')
+                return response
+
+            rows, cols = np.where(occ_mask)
+            xs = self.grid.origin_x + (cols + 0.5) * self.grid.resolution
+            ys = self.grid.origin_y + (rows + 0.5) * self.grid.resolution
+
+            sx_known = float(self.get_parameter('workspace_size_x').value)
+            sy_known = float(self.get_parameter('workspace_size_y').value)
+
+            # Rectangles have 180° symmetry; search angle in [0, 90°) and
+            # try both (sx, sy) and (sy, sx) so the long side may end up
+            # along either world axis.
+            best = None
+            for theta_deg in np.arange(0.0, 90.0, 0.5):
+                theta = math.radians(theta_deg)
+                c, s = math.cos(theta), math.sin(theta)
+                rx =  c * xs + s * ys     # points expressed in rotated frame
+                ry = -s * xs + c * ys
+                xmin, xmax = np.percentile(rx, [2.0, 98.0])
+                ymin, ymax = np.percentile(ry, [2.0, 98.0])
+                bbox_sx = float(xmax - xmin)
+                bbox_sy = float(ymax - ymin)
+                cx_r = 0.5 * (xmin + xmax)
+                cy_r = 0.5 * (ymin + ymax)
+                # Try both alignments of the known rectangle
+                for s_a, s_b in ((sx_known, sy_known), (sy_known, sx_known)):
+                    err = abs(bbox_sx - s_a) + abs(bbox_sy - s_b)
+                    if best is None or err < best[0]:
+                        best = (err, theta, cx_r, cy_r, s_a, s_b)
+
+            err, theta, cx_r, cy_r, s_a, s_b = best
+            # Map centre back to world frame: world = R(+theta) · rotated
+            c, s = math.cos(theta), math.sin(theta)
+            cx_w = c * cx_r - s * cy_r
+            cy_w = s * cx_r + c * cy_r
+
+            pad = float(self.get_parameter('workspace_pad').value)
+            self.grid.set_workspace_rotated(
+                cx_w, cy_w, s_a + 2.0 * pad, s_b + 2.0 * pad, theta,
+            )
+            n_zeroed = self.grid.scrub_outside_workspace()
+            self._map_dirty = True
+
+            msg = (
+                f'workspace locked: centre=({cx_w:+.2f},{cy_w:+.2f}) m  '
+                f'size={s_a:.2f}×{s_b:.2f} m  θ={math.degrees(theta):+.1f}°  '
+                f'fit_err={err:.3f} m, scrubbed {n_zeroed} cells'
+            )
+            self.get_logger().info(msg)
+            response.success = True
+            response.message = msg
+        except Exception as exc:
+            response.success = False
+            response.message = f'auto_fit_workspace failed: {exc}'
         return response
 
     def _reset_map_cb(self, request, response):
@@ -999,6 +1131,18 @@ class SLAMNode(Node):
 
         self._scan_count += 1
         if self._scan_count % self.get_parameter('map_publish_every').value == 0:
+            # Workspace scrub: periodically zero any log-odds that
+            # leaked outside the known room.  Cheap (one vectorised
+            # mask).  Throttled so we don't do it every publish.
+            scrub_every = int(self.get_parameter('workspace_scrub_every').value)
+            if scrub_every > 0 and self._scan_count % (
+                    scrub_every * self.get_parameter('map_publish_every').value) == 0:
+                n_zeroed = self.grid.scrub_outside_workspace()
+                if n_zeroed > 0:
+                    self.get_logger().info(
+                        f'Workspace scrub: zeroed {n_zeroed} cells outside boundary.',
+                        throttle_duration_sec=5.0,
+                    )
             self._publish_map(now)
 
         # Cache current scan (world frame + base frame + raw ranges)

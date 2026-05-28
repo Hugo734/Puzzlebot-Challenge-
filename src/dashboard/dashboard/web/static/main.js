@@ -984,6 +984,25 @@ function initSystemMode() {
       btn.classList.remove('saving');
     }
   });
+
+  // Fit Workspace button — auto-detect & lock the room rectangle
+  document.getElementById('btnFitWorkspace')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btnFitWorkspace');
+    btn.classList.add('saving');
+    try {
+      const res  = await fetch('/api/slam/fit_workspace', {method: 'POST'});
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast(data.message || 'Workspace locked', 'success');
+      } else {
+        showToast(`Fit failed: ${data.message || 'unknown error'}`, 'error');
+      }
+    } catch (err) {
+      showToast(`Fit error: ${err}`, 'error');
+    } finally {
+      btn.classList.remove('saving');
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

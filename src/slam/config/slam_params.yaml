@@ -5,6 +5,26 @@ slam_node:
     map_width:    400           # cells  (20 m)
     map_height:   400           # cells  (20 m)
 
+    # ── Workspace mask (OPT-IN) ───────────────────────────────────
+    # Disabled by default because it requires the SLAM origin (robot's
+    # start pose) to be the workspace centre.  When enabled, any LiDAR
+    # endpoint outside the box is dropped at integration and a periodic
+    # scrub zeros leaked cells.  Useful for known bounded environments
+    # like a 4.86 × 3.76 m test track.
+    #
+    # To use:
+    #   1. Place the robot exactly at the CENTRE of the room, aligned
+    #      with the long axis along X.
+    #   2. Set workspace_enabled: true below.
+    #   3. (Optional) tune workspace_center_{x,y} if you start off-centre.
+    workspace_enabled:    false
+    workspace_center_x:   0.0
+    workspace_center_y:   0.0
+    workspace_size_x:     4.86   # m  (long side)
+    workspace_size_y:     3.76   # m  (short side)
+    workspace_pad:        0.40   # m  margin for pose drift / start offset
+    workspace_scrub_every: 5     # run scrub every N map publishes
+
     # Log-odds increments + clamps.
     #
     # Tuning principle:  WALLS MUST BE STICKY.
@@ -30,9 +50,8 @@ slam_node:
     l_max:        4.0
 
     # Display thresholds for to_ros_data().  Higher than the update
-    # increments so only multi-scan-confirmed walls (≥ 5 hits) appear
-    # as occupied — single-scan smears never reach this and stay
-    # "unknown" (grey) until enough scans agree.
+    # increments so only multi-scan-confirmed walls appear as occupied.
+    # Back to 2.5 (~5 hits) — 3.0 was too high and starved the map.
     display_l_occ:   2.5
     display_l_free: -1.2
 
@@ -74,16 +93,20 @@ slam_node:
     # constant within a 100 ms scan, and wheel slip biases the
     # odom-reported ω), so integrating that scan smears walls.
     # The matcher still runs — only the WRITE to the grid is gated.
-    map_update_omega_max: 0.5   # rad/s (~29°/s)
+    # Slightly tighter than the original 0.5 to reduce rotation-spike
+    # artifacts, but loose enough that normal teleop turns still
+    # contribute scans.
+    map_update_omega_max: 0.4   # rad/s (~23°/s)
 
-    # Integration confidence gates — these are the PRIMARY defence
-    # against bad-pose / bad-deskew scans contaminating the map.
-    # The matcher's pose is accepted (so we don't lose localisation),
-    # but if it had to fight to converge, the scan is probably
-    # mis-shapen and we DON'T write it.  Wait for a crisp one instead.
-    integrate_max_fitness: 0.10   # m RMS; tighter than icp_max_fitness (0.20)
-    integrate_max_xy_corr: 0.10   # m   |Δxy| from matcher correction
-    integrate_max_th_corr: 0.10   # rad ~5.7°   |Δθ| from matcher correction
+    # Integration confidence gates — defence against bad-pose / bad-
+    # deskew scans contaminating the map.  The matcher's pose is
+    # accepted (so we don't lose localisation), but if it had to fight
+    # to converge, the scan is mis-shapen and we DON'T write it.
+    # Original 0.10/0.10/0.10 were tested and produced clean maps;
+    # tightening further starves the map of contributions.
+    integrate_max_fitness: 0.10   # m RMS
+    integrate_max_xy_corr: 0.10   # m
+    integrate_max_th_corr: 0.07   # rad ~4°  (slightly tighter on rotation)
 
     # ── ICP scan matcher ─────────────────────────────────────────
     use_icp:                true
