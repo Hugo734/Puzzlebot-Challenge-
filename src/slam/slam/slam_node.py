@@ -1,6 +1,7 @@
 import math
 import os
 from collections import deque
+from typing import Optional
 
 import numpy as np
 
@@ -214,7 +215,14 @@ class SLAMNode(Node):
         # Empirically real matches in this room score 250-450; bad
         # alignments score <150.  180 is in the safe gap.
         self.declare_parameter('auto_localize_min_score',  180.0)
-        self.declare_parameter('auto_localize_max_tries',  6)
+        # Persistent retry: keep trying global localization until either
+        # a scan clears the threshold OR (after this many tries) we snap
+        # to the best hypothesis seen so far and let ICP refine.
+        # 0 = never accept best-of-N (retry forever).
+        self.declare_parameter('auto_localize_max_tries',           20)
+        # Throttle between consecutive global-CSM attempts (seconds).
+        # Each attempt is ~100–200 ms, so 2 s keeps CPU headroom.
+        self.declare_parameter('auto_localize_retry_period',         2.0)
         self.declare_parameter('map_yaml',        '')
         self.declare_parameter('initial_x',       0.0)
         self.declare_parameter('initial_y',       0.0)
@@ -295,6 +303,9 @@ class SLAMNode(Node):
             and self.get_parameter('auto_localize').value
         )
         self._auto_localize_tries = 0
+        self._auto_localize_last_attempt = 0.0           # seconds (ROS time)
+        # Best (x, y, th, score) seen so far, used as fallback after N tries.
+        self._auto_localize_best: Optional[tuple] = None
 
         # Localization mode = freeze the grid (no new log-odds writes),
         # because in localization the saved map is fixed and any updates
@@ -437,6 +448,16 @@ class SLAMNode(Node):
             callback_group=self._main_cbg,
         )
 
+        # Service: re-arm the global auto-localizer.  Used by the dashboard
+        # "Relocate" button (and CLI) when the user sees the laser is not
+        # aligned to the saved map.  Equivalent to receiving /initialpose
+        # except the search re-runs from scratch and the user doesn't have
+        # to guess the pose — we just look again.
+        self.create_service(
+            Trigger, '~/relocalize', self._relocalize_cb,
+            callback_group=self._main_cbg,
+        )
+
         if not _HAS_KDTREE:
             self.get_logger().warn(
                 'scipy.spatial.cKDTree NOT available — falling back to '
@@ -546,6 +567,29 @@ class SLAMNode(Node):
                 'Switched to MAPPING: grid updates re-enabled.'
             )
 
+    def _relocalize_cb(self, request, response):
+        """Re-arm the global auto-localizer.
+
+        Called by the dashboard "Relocate" button (or CLI) when the user
+        sees the laser misaligned to the saved map.  The next scan
+        callback will start a fresh 3-stage global search; subsequent
+        scans keep retrying until it converges, falling back to the
+        best-of-N pose after `auto_localize_max_tries`.
+        """
+        try:
+            self._auto_localize_pending = True
+            self._auto_localize_tries = 0
+            self._auto_localize_best = None
+            self._auto_localize_last_attempt = 0.0
+            self.get_logger().info(
+                'Relocalize requested — auto-localizer re-armed.')
+            response.success = True
+            response.message = 'auto-localize re-armed'
+        except Exception as exc:
+            response.success = False
+            response.message = f'relocalize failed: {exc}'
+        return response
+
     def _reset_map_cb(self, request, response):
         """Clear the occupancy grid back to "unknown" (used by the dashboard
         when the user chose to start mapping from scratch).
@@ -579,6 +623,12 @@ class SLAMNode(Node):
             xy_step=xy_step, th_step_deg=th_step_d,
             score_floor=0.0)
         dt_ms = (self.get_clock().now() - t0).nanoseconds * 1e-6
+        # Track best hypothesis across attempts so the throttled-retry loop
+        # can fall back to it if the threshold is never cleared.
+        if (self._auto_localize_best is None
+                or score > self._auto_localize_best[3]):
+            self._auto_localize_best = (float(x), float(y), float(th), float(score))
+
         if score < min_score:
             self.get_logger().warn(
                 f'Auto-localize attempt {self._auto_localize_tries + 1}: '
@@ -810,21 +860,38 @@ class SLAMNode(Node):
         if len(cloud) < self.get_parameter('icp_min_points').value:
             return
 
-        # ── Auto-localization (one-shot at startup, localization mode) ─
+        # ── Auto-localization (throttled retry, localization mode) ─
+        # Keep retrying every `auto_localize_retry_period` seconds until a
+        # scan clears the threshold; if max_tries is reached without
+        # success, snap to the best-scoring hypothesis seen and let ICP
+        # refine it. The user can also force a re-run via the
+        # `~/relocalize` service or `/initialpose`.
         if self._auto_localize_pending:
-            if self._try_auto_localize(cloud):
-                self._auto_localize_pending = False
-            else:
-                self._auto_localize_tries += 1
-                if self._auto_localize_tries >= int(
-                        self.get_parameter('auto_localize_max_tries').value):
-                    self.get_logger().warn(
-                        f'Auto-localize gave up after '
-                        f'{self._auto_localize_tries} tries — falling back '
-                        f'to initial pose ({self._sx:.2f}, {self._sy:.2f}, '
-                        f'{math.degrees(self._stheta):.1f}°).  Set the pose '
-                        f'manually via RViz 2D Pose Estimate.')
+            now_s = self.get_clock().now().nanoseconds * 1e-9
+            period = float(self.get_parameter('auto_localize_retry_period').value)
+            if now_s - self._auto_localize_last_attempt >= period:
+                self._auto_localize_last_attempt = now_s
+                if self._try_auto_localize(cloud):
                     self._auto_localize_pending = False
+                    self._auto_localize_tries = 0
+                    self._auto_localize_best = None
+                else:
+                    self._auto_localize_tries += 1
+                    max_tries = int(self.get_parameter('auto_localize_max_tries').value)
+                    if (max_tries > 0
+                            and self._auto_localize_tries >= max_tries
+                            and self._auto_localize_best is not None):
+                        bx, by, bth, bscore = self._auto_localize_best
+                        self.get_logger().warn(
+                            f'Auto-localize: threshold not cleared in '
+                            f'{self._auto_localize_tries} tries — accepting '
+                            f'best-of pose ({bx:+.2f}, {by:+.2f}, '
+                            f'{math.degrees(bth):+.1f}°)  score={bscore:.1f}. '
+                            f'ICP will refine from here.')
+                        self._set_pose(bx, by, bth)
+                        self._auto_localize_pending = False
+                        self._auto_localize_tries = 0
+                        self._auto_localize_best = None
             now = self.get_clock().now().to_msg()
             self._publish_pose(now)
             self._publish_tf(now)

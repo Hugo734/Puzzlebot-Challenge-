@@ -38,7 +38,7 @@ from rclpy.qos import (QoSProfile, ReliabilityPolicy, DurabilityPolicy,
                         qos_profile_sensor_data)
 
 from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import Path
+from nav_msgs.msg import OccupancyGrid, Path
 from sensor_msgs.msg import LaserScan, PointCloud2, PointField
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -103,11 +103,50 @@ class NavNode(Node):
         self.declare_parameter('local_costmap_occ_threshold', 0.4)
 
         # ── Continuous path validity check ────────────────────────────
-        self.declare_parameter('path_validity_lookahead', 3.0)
-        self.declare_parameter('path_blocked_hysteresis', 3)
+        # Lookahead is intentionally short: we only want to trigger a
+        # replan if there's an obstacle IMMEDIATELY in front of the
+        # robot's planned route, not anywhere within the next 3 m.
+        # A wider lookahead caused replan flapping because distant
+        # noise in the costmap would constantly flag the path as bad.
+        self.declare_parameter('path_validity_lookahead', 1.0)
+        self.declare_parameter('path_blocked_hysteresis', 12)
+        # The validity check inflates obstacles by this factor of the
+        # PLAN-TIME inflation when scanning the upcoming path.  Using a
+        # value < 1.0 avoids flapping: A* places the path exactly at the
+        # planner's inflation boundary, so a validity check at the SAME
+        # inflation would always trigger and force a replan on every tick.
+        # 0.5 means "replan only when something is half the planner
+        # margin closer than expected" — robust against costmap noise.
+        self.declare_parameter('path_validity_inflation_factor', 0.5)
+        # Minimum seconds between two consecutive replans.  After a
+        # replan, we COMMIT to the new path for at least this long even
+        # if the validity check screams.  The safety bubble still halts
+        # the robot for true collisions, so this cooldown is safe.
+        self.declare_parameter('replan_cooldown', 3.0)
+        # Master switch for validity-triggered replans during FOLLOWING.
+        # When False (default), once a path is found the robot commits
+        # to it until arrival OR a hard safety event (bubble → wait →
+        # Bug1 fallback).  Set True if you want the robot to opportunis-
+        # tically re-plan around obstacles its costmap discovers en route.
+        self.declare_parameter('enable_validity_replan', False)
 
         # ── 360° safety bubble ────────────────────────────────────────
-        self.declare_parameter('safety_bubble_radius', 0.25)
+        # Max bubble used when the path has full inflation.  The effective
+        # bubble shrinks to match the plan-time inflation when fallback
+        # had to use a tighter path, so the bubble never fires on the
+        # walls the planner already routed around.
+        self.declare_parameter('safety_bubble_radius', 0.20)
+        # Floor for the bubble even when plan inflation went to 0 — keeps
+        # the robot from literally touching anything.  ~half a robot
+        # radius.
+        self.declare_parameter('safety_bubble_min',    0.07)
+        # When false (default) the robot does NOT fall back to Bug1 if the
+        # WAIT-for-clear timeout expires.  In a fully-mapped environment
+        # Bug1's wall-follow rarely helps (the planner already routed
+        # around static obstacles) and frequently terminates with
+        # "ERROR: Bug1 blocked". Set true if operating in maps with
+        # unmodelled obstacles you want the robot to circumnavigate.
+        self.declare_parameter('enable_bug1',          False)
 
         # ── Dynamic-obstacle wait policy ──────────────────────────────
         self.declare_parameter('wait_for_clear_timeout', 5.0)
@@ -181,6 +220,17 @@ class NavNode(Node):
         )
         self._last_costmap_tick_time: Optional[float] = None
 
+        # Inflation that produced the currently-followed path.  Used by
+        # the path-validity check so its inflation is consistent with the
+        # plan-time inflation (otherwise validity flaps and replan loops).
+        self._path_plan_infl: float = float(
+            self.get_parameter('inflation_radius').value
+        )
+
+        # Wall-clock (sec) of the last successful (re)plan.  Used to
+        # gate validity-triggered replans so we don't thrash.
+        self._last_replan_time: Optional[float] = None
+
         # Path-validity hysteresis counter (consecutive blocked ticks)
         self._path_blocked_ticks: int = 0
 
@@ -198,6 +248,12 @@ class NavNode(Node):
         self.create_subscription(PoseStamped, '/slam_pose',     self._pose_cb, reliable_qos)
         self.create_subscription(String,      '/goal_waypoint', self._goal_cb, reliable_qos)
         self.create_subscription(LaserScan,   '/scan',          self._scan_cb, qos_profile_sensor_data)
+
+        # /map (from slam_node): keep our planning grid in sync with the live
+        # map. This means a saved-then-switched-to-NAV flow doesn't require a
+        # launch restart — and a fresh cold boot with no map_yaml will still
+        # work once SLAM publishes the first grid.
+        self.create_subscription(OccupancyGrid, '/map', self._map_cb, 1)
 
         # /system_mode (latched, transient_local) — dashboard publishes mode
         mode_qos = QoSProfile(
@@ -243,6 +299,36 @@ class NavNode(Node):
             self._costmap.integrate_scan(
                 msg, self._pose_x, self._pose_y, self._pose_theta
             )
+
+    def _map_cb(self, msg: OccupancyGrid) -> None:
+        """Replace the static planning grid with the latest map from SLAM.
+
+        slam_node publishes /map on every Nth scan during MAPPING and once
+        per save during NAVIGATION (latched data, but default QoS here is
+        fine since slam re-publishes shortly after we connect).
+        """
+        w = msg.info.width
+        h = msg.info.height
+        if w == 0 or h == 0:
+            return
+        try:
+            grid = np.asarray(msg.data, dtype=np.int8).reshape((h, w))
+        except ValueError as exc:
+            self.get_logger().warn(f'/map reshape failed ({w}x{h}): {exc}')
+            return
+
+        first_load = self._grid is None
+        self._grid       = grid
+        self._origin_x   = float(msg.info.origin.position.x)
+        self._origin_y   = float(msg.info.origin.position.y)
+        self._resolution = float(msg.info.resolution)
+
+        if first_load:
+            self.get_logger().info(
+                f'/map received: {w}x{h} cells, res={self._resolution} m, '
+                f'origin=({self._origin_x:.3f}, {self._origin_y:.3f})'
+            )
+            self._publish_map_walls()
 
     def _reload_waypoints_cb(self, request, response):
         """Re-read waypoints.yaml from disk so newly-added waypoints become
@@ -329,15 +415,12 @@ class NavNode(Node):
         planning_grid = self._grid_with_live_scan(
             self._pose_x, self._pose_y, self._pose_theta
         )
-        infl = self.get_parameter('inflation_radius').value
-        path = astar_plan(
-            planning_grid, self._origin_x, self._origin_y, self._resolution,
+        path = self._plan_with_fallback(
+            planning_grid,
             self._pose_x, self._pose_y, goal_x, goal_y,
-            inflation_radius=infl,
+            label=f'"{name}"',
         )
-
         if path is None:
-            self.get_logger().error(f'A* found no path to "{name}"')
             self._publish_status(f'ERROR: no path to {name}')
             self._state = _State.IDLE
             return
@@ -346,6 +429,7 @@ class NavNode(Node):
         self._path = path
         self._current_goal_name = name
         self._path_blocked_ticks = 0
+        self._last_replan_time = self.get_clock().now().nanoseconds * 1e-9
         self._state = _State.FOLLOWING
         self._publish_status(f'FOLLOWING: {name}')
 
@@ -366,11 +450,15 @@ class NavNode(Node):
 
         px, py, theta = self._pose_x, self._pose_y, self._pose_theta
 
-        # ── 360° safety bubble: emergency stop in any active driving state ──
-        active_driving = self._state in (
-            _State.FOLLOWING, _State.RETURNING_LEAVE, _State.WALL_FOLLOWING
-        )
-        if active_driving and self._safety_bubble_violated():
+        # ── 360° safety bubble: emergency stop ONLY in FOLLOWING ──
+        # Pure pursuit doesn't look sideways, so we add a 360° bubble to
+        # catch sudden close obstacles.  In WALL_FOLLOWING / RETURNING_
+        # LEAVE the Bug1 controller has its own front-arc obstacle
+        # awareness (obstacle_distance) and ALREADY assumes it's close
+        # to walls — the global bubble there caused a deadlock loop
+        # (Bug1 → bubble breach → WAIT → Bug1 → breach → …) because the
+        # robot was wedged near a rack and Bug1 needed room to manoeuvre.
+        if self._state == _State.FOLLOWING and self._safety_bubble_violated():
             self._publish_stop()
             self.get_logger().warn(
                 'Safety bubble breached — emergency STOP, entering WAITING_FOR_CLEAR'
@@ -413,27 +501,45 @@ class NavNode(Node):
             self._on_arrived()
             return
 
-        # Continuous path validity: scan the next N metres of the planned
-        # path against the rolling costmap.  Hysteresis avoids flapping.
-        if self._path_ahead_blocked(px, py):
-            self._path_blocked_ticks += 1
-        else:
-            self._path_blocked_ticks = 0
+        # Continuous path validity check.  Default behaviour (with
+        # enable_validity_replan=False) is to COMMIT to the path the
+        # planner produced and never swap it out from under the
+        # controller — the user explicitly asked for "stay with the
+        # first path you find".  The safety bubble + WAITING_FOR_CLEAR
+        # + Bug1 fallback handle real obstacles.
+        if bool(self.get_parameter('enable_validity_replan').value):
+            now_s = self.get_clock().now().nanoseconds * 1e-9
+            cooldown = float(self.get_parameter('replan_cooldown').value)
+            in_cooldown = (
+                self._last_replan_time is not None
+                and (now_s - self._last_replan_time) < cooldown
+            )
 
-        hysteresis = int(self.get_parameter('path_blocked_hysteresis').value)
-        if self._path_blocked_ticks >= hysteresis:
-            self._publish_stop()
-            self.get_logger().info(
-                f'Path blocked for {self._path_blocked_ticks} ticks — replanning'
-            )
+            if in_cooldown:
+                self._path_blocked_ticks = 0
+            else:
+                if self._path_ahead_blocked(px, py):
+                    self._path_blocked_ticks += 1
+                else:
+                    self._path_blocked_ticks = 0
+
+                hysteresis = int(self.get_parameter('path_blocked_hysteresis').value)
+                if self._path_blocked_ticks >= hysteresis:
+                    self._publish_stop()
+                    self.get_logger().info(
+                        f'Path blocked for {self._path_blocked_ticks} ticks — replanning'
+                    )
+                    self._path_blocked_ticks = 0
+                    if self._replan_from_current(px, py):
+                        return
+                    self.get_logger().warn(
+                        'Replan failed — entering WAITING_FOR_CLEAR (dynamic-obstacle wait)'
+                    )
+                    self._enter_waiting(px, py)
+                    return
+        else:
+            # Keep the counter sane in case it's used elsewhere.
             self._path_blocked_ticks = 0
-            if self._replan_from_current(px, py):
-                return
-            self.get_logger().warn(
-                'Replan failed — entering WAITING_FOR_CLEAR (dynamic-obstacle wait)'
-            )
-            self._enter_waiting(px, py)
-            return
 
         lookahead = self.get_parameter('lookahead_distance').value
         if dist_to_goal < lookahead:
@@ -513,10 +619,23 @@ class NavNode(Node):
             return
 
         if elapsed >= timeout:
-            self.get_logger().warn(
-                f'Wait-for-clear timeout ({timeout:.1f} s) — entering Bug1 wall follow.'
-            )
-            self._enter_wall_follow(px, py)
+            if bool(self.get_parameter('enable_bug1').value):
+                self.get_logger().warn(
+                    f'Wait-for-clear timeout ({timeout:.1f} s) — entering Bug1 wall follow.'
+                )
+                self._enter_wall_follow(px, py)
+            else:
+                self.get_logger().error(
+                    f'Wait-for-clear timeout ({timeout:.1f} s) — Bug1 disabled, '
+                    f'giving up on "{self._current_goal_name}".  '
+                    f'Move the obstacle and re-send the goal.'
+                )
+                self._publish_stop()
+                self._publish_status(
+                    f'ERROR: blocked {self._current_goal_name}'
+                )
+                self._path = []
+                self._state = _State.IDLE
 
     # ------------------------------------------------------------------
     # Bug1 — wall following (phase 1)
@@ -667,6 +786,70 @@ class NavNode(Node):
         cmd.angular.z = omega
         self._cmd_vel_pub.publish(cmd)
 
+    def _plan_with_fallback(
+        self,
+        planning_grid: np.ndarray,
+        sx: float, sy: float,
+        gx: float, gy: float,
+        label: str,
+    ) -> Optional[List[WorldPt]]:
+        """Run A* with progressive inflation fallback.
+
+        We first try at the configured ``inflation_radius``.  If that
+        returns no path we step down — 75 %, 50 %, 25 %, 0 % — because a
+        common failure mode is a goal pinned next to a wall, or rack
+        legs whose inflation seals off an otherwise-clear corridor.
+        Reducing inflation only changes the planner's safety margin;
+        the pure-pursuit + local costmap + 360° safety bubble at runtime
+        still protect against collisions.
+
+        Returns the path (list of world points) or None if every
+        inflation level failed.  Emits a single WARN with diagnostics
+        when the planner gives up entirely.
+        """
+        infl0 = float(self.get_parameter('inflation_radius').value)
+        # Coarse-to-fine ladder.  Floor at 0.5× grid res so we don't
+        # ask for sub-cell inflation (would be a no-op anyway).
+        min_step = 0.5 * self._resolution
+        ladder = [infl0, infl0 * 0.75, infl0 * 0.5, infl0 * 0.25, 0.0]
+        ladder = sorted({round(max(v, 0.0), 4) for v in ladder
+                          if v <= infl0 + 1e-6}, reverse=True)
+        if ladder and ladder[-1] > 0.0:
+            ladder.append(0.0)
+
+        for infl in ladder:
+            path = astar_plan(
+                planning_grid, self._origin_x, self._origin_y, self._resolution,
+                sx, sy, gx, gy, inflation_radius=infl,
+            )
+            if path is not None:
+                if infl < infl0 - 1e-6:
+                    self.get_logger().warn(
+                        f'A* succeeded for {label} only at reduced inflation '
+                        f'{infl:.2f} m (default {infl0:.2f} m); path may be tight.'
+                    )
+                # Remember plan-time inflation so the validity check can
+                # use a consistently tighter margin (avoids replan flapping).
+                self._path_plan_infl = float(infl)
+                return path
+
+        # All fallbacks failed — emit one diagnostic line so the operator
+        # can see whether the grid itself is the problem.
+        try:
+            occ  = int(np.count_nonzero(planning_grid == 100))
+            unk  = int(np.count_nonzero(planning_grid == -1))
+            free = int(planning_grid.size - occ - unk)
+            self.get_logger().error(
+                f'A* found no path to {label} at ANY inflation level '
+                f'(tried {ladder}). Grid: {free} free / {occ} occ / {unk} unknown. '
+                f'Start ({sx:.2f}, {sy:.2f}) → Goal ({gx:.2f}, {gy:.2f}). '
+                f'Origin=({self._origin_x:.2f}, {self._origin_y:.2f}) '
+                f'res={self._resolution}.'
+            )
+        except Exception:
+            self.get_logger().error(f'A* found no path to {label} (diagnostics unavailable).')
+        return None
+
     def _replan_from_current(self, px: float, py: float) -> bool:
         """Run A* (with live scan overlay) from current position to current goal.
 
@@ -680,20 +863,18 @@ class NavNode(Node):
 
         wp = self._waypoints[self._current_goal_name]
         gx, gy = wp['x'], wp['y']
-        infl = self.get_parameter('inflation_radius').value
 
         planning_grid = self._grid_with_live_scan(px, py, self._pose_theta)
-        path = astar_plan(
-            planning_grid, self._origin_x, self._origin_y, self._resolution,
-            px, py, gx, gy, inflation_radius=infl,
+        path = self._plan_with_fallback(
+            planning_grid, px, py, gx, gy,
+            label=f'"{self._current_goal_name}" (replan)',
         )
-
         if path is None:
-            self.get_logger().warn('Replan failed — no path in augmented grid')
             return False
 
         self.get_logger().info(f'Replanned path ({len(path)} pts), resuming FOLLOWING')
         self._path = path
+        self._last_replan_time = self.get_clock().now().nanoseconds * 1e-9
         self._state = _State.FOLLOWING
         self._publish_status(f'FOLLOWING: {self._current_goal_name}')
         return True
@@ -760,12 +941,27 @@ class NavNode(Node):
     # Safety bubble (360°)
     # ------------------------------------------------------------------
 
+    def _effective_safety_bubble(self) -> float:
+        """Bubble radius scaled to the plan-time inflation.
+
+        The planner placed the current path at ``_path_plan_infl`` from
+        any obstacle.  Setting the bubble much wider than that would
+        always fire on the very walls the planner just routed around —
+        which is exactly the "Bug1 blocked" deadlock we hit at tight
+        goals.  Clamp the bubble to [min, configured_max] and shrink it
+        toward the plan inflation so it only fires on genuinely NEW
+        obstacles closer than the planner's safety margin.
+        """
+        max_b = float(self.get_parameter('safety_bubble_radius').value)
+        min_b = float(self.get_parameter('safety_bubble_min').value)
+        return max(min_b, min(max_b, float(self._path_plan_infl)))
+
     def _safety_bubble_violated(self) -> bool:
-        """True if any scan ray in 360° is closer than safety_bubble_radius."""
+        """True if any scan ray in 360° is closer than the effective bubble."""
         scan = self._latest_scan
         if scan is None:
             return False
-        radius = self.get_parameter('safety_bubble_radius').value
+        radius = self._effective_safety_bubble()
         for r in scan.ranges:
             if not math.isfinite(r):
                 continue
@@ -788,8 +984,15 @@ class NavNode(Node):
         if lookahead <= 0.0:
             return False
 
-        # Inflation in costmap cells, derived from inflation_radius parameter.
-        infl_m = self.get_parameter('inflation_radius').value
+        # Inflation in costmap cells.  Must be STRICTLY TIGHTER than the
+        # one used to plan the path: A* places path cells exactly at the
+        # planner inflation boundary, so checking at the same inflation
+        # would always trigger a "blocked" — even on a perfectly clean
+        # plan — and cause replan flapping (the symptom we're guarding
+        # against).  Scale by `path_validity_inflation_factor` (default
+        # 0.5) of the inflation that produced this path.
+        infl_factor = float(self.get_parameter('path_validity_inflation_factor').value)
+        infl_m = max(0.0, self._path_plan_infl * infl_factor)
         infl_cells = max(0, int(round(infl_m / self._costmap.resolution)))
 
         # Find the closest point on the path to the robot, then walk forward

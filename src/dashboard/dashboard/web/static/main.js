@@ -936,6 +936,25 @@ function initSystemMode() {
       btn.classList.remove('saving');
     }
   });
+
+  // Relocalize button — re-runs SLAM global auto-localization
+  document.getElementById('btnRelocalize')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btnRelocalize');
+    btn.classList.add('saving');
+    try {
+      const res  = await fetch('/api/slam/relocalize', {method: 'POST'});
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast('Relocating… watch the laser snap to the map', 'success');
+      } else {
+        showToast(`Relocate failed: ${data.message || 'unknown error'}`, 'error');
+      }
+    } catch (err) {
+      showToast(`Relocate error: ${err}`, 'error');
+    } finally {
+      btn.classList.remove('saving');
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

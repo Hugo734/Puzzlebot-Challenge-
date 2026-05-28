@@ -52,8 +52,13 @@ def generate_launch_description():
         description='Initial system mode (mapping | navigation).',
     )
     map_yaml_arg = DeclareLaunchArgument(
-        'map_yaml', default_value='',
-        description='Path to saved map yaml (empty string = start fresh, no preload)',
+        'map_yaml', default_value=map_yaml_default,
+        description=(
+            'Path to saved map yaml. Default = ~/ros2_maps/warehouse.yaml so '
+            'SLAM preloads the existing map (instead of wiping it) and '
+            'nav_node has a fallback initial grid. Pass an empty string '
+            'to force a fresh empty grid.'
+        ),
     )
     rviz_arg = DeclareLaunchArgument(
         'rviz', default_value='true',
@@ -191,7 +196,7 @@ def generate_launch_description():
         map_saver_node,
         nav_node,
         mission_node,
-        # dashboard_node,
+        dashboard_node,
         # lifting_node,  # disabled until the FPGA-driven lifter is wired up
         voice_node,
         rviz_node,

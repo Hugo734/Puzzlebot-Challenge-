@@ -42,16 +42,51 @@ nav_node:
     local_costmap_occ_threshold: 0.4   # cell score above which a cell counts as occupied
 
     # ── Continuous path validity check ────────────────────────────────
-    path_validity_lookahead:     3.0   # m of path ahead validated each tick
-    path_blocked_hysteresis:     3     # consecutive blocked ticks needed to replan
+    # Shortened from 3.0 → 1.0 m so we only react to obstacles IMMEDIATELY
+    # in front of the robot.  A wide lookahead caused replan flapping
+    # because distant costmap noise constantly flagged the path as bad.
+    path_validity_lookahead:     1.0
+    # Consecutive blocked ticks needed to trigger a replan.  Bumped from
+    # 3 → 12 (≈1.2 s at 10 Hz) so a single noisy scan doesn't fire a
+    # replan loop that swaps paths every tick.
+    path_blocked_hysteresis:     12
+    # Validity check inflation scaled relative to the PLAN-TIME inflation.
+    # Must be < 1.0, otherwise the check fires on every tick because A*
+    # places the path exactly at the planner inflation boundary.  0.5
+    # gives a 50 % safety margin without causing flap.
+    path_validity_inflation_factor: 0.5
+    # After a (re)plan, commit to the new path for at least this long
+    # before another validity-triggered replan can fire.  Only used when
+    # enable_validity_replan: true.
+    replan_cooldown:             3.0   # s
+    # Master switch.  When false (default), the robot commits to the
+    # path produced by the planner and never re-plans while FOLLOWING.
+    # Real obstacles are caught by the safety bubble + WAIT + Bug1.
+    # Flip to true if you want continuous re-planning around new
+    # obstacles detected in the costmap.
+    enable_validity_replan:      false
 
-    # ── 360° safety bubble (emergency STOP) ───────────────────────────
-    safety_bubble_radius:        0.25  # m — any scan hit closer than this halts the robot
+    # ── 360° safety bubble (emergency STOP, FOLLOWING state only) ─────
+    # MAX bubble radius — used when path is planned with full inflation.
+    # The effective radius at runtime is min(safety_bubble_radius,
+    # plan_time_inflation), clamped to safety_bubble_min.  This means
+    # the bubble shrinks to match tight paths so it never fires on the
+    # walls the planner already routed around.
+    safety_bubble_radius:        0.20  # m
+    safety_bubble_min:           0.07  # m  hard floor
 
     # ── Dynamic-obstacle wait policy ──────────────────────────────────
-    # When replan fails, wait this long (retrying replan) before falling
-    # back to Bug1 wall-following.  Useful for slow-moving people/robots.
+    # When the safety bubble fires, wait this long (retrying replan
+    # each tick) before either (a) entering Bug1 if enable_bug1=true,
+    # or (b) giving up on the goal if enable_bug1=false (default).
     wait_for_clear_timeout:      5.0   # s
+    # Bug1 fallback is OFF by default.  In a fully-mapped environment
+    # the planner already routes around static obstacles, and Bug1's
+    # wall-follow almost always terminates with "Bug1 blocked" because
+    # the circumnavigation can't get closer to the goal than the
+    # original hit point.  Set true if operating in maps with
+    # unmodelled obstacles you want the robot to physically go around.
+    enable_bug1:                 false
 
 # Legacy navigation_node parameters (kept for backward compatibility)
 navigation_node:
