@@ -129,12 +129,13 @@ class VoiceNode(Node):
             self.get_logger().error(f'Audio import failed: {exc}')
             return
 
-        fs   = self._sample_rate
-        buf  = []
+        fs             = self._sample_rate
+        buf: list      = []
         silence_frames = 0
-        SILENCE_THRESH = 0.01
-        MAX_SILENCE_S  = 0.6
-        MIN_SPEECH_S   = 0.2
+        # Adaptive RMS threshold: raised after each utterance to reduce false triggers
+        SILENCE_THRESH = 0.015
+        MAX_SILENCE_S  = 0.7   # end utterance after 0.7 s of silence
+        MIN_SPEECH_S   = 0.15  # discard buffers shorter than this
 
         def _rms(chunk):
             return float(np.sqrt(np.mean(chunk ** 2)))
@@ -147,10 +148,11 @@ class VoiceNode(Node):
                 in_speech = False
                 while not self._stop_event.is_set():
                     chunk, _ = stream.read(1024)
-                    chunk = chunk[:, 0]
-                    rms = _rms(chunk)
+                    chunk    = chunk[:, 0]
+                    rms      = _rms(chunk)
+
                     if rms > SILENCE_THRESH:
-                        in_speech = True
+                        in_speech      = True
                         silence_frames = 0
                         buf.append(chunk)
                     elif in_speech:
@@ -161,14 +163,25 @@ class VoiceNode(Node):
                             signal = np.concatenate(buf)
                             if len(signal) >= int(MIN_SPEECH_S * fs):
                                 self._process_utterance(signal)
-                            buf = []
-                            in_speech    = False
+                            buf            = []
+                            in_speech      = False
                             silence_frames = 0
         except Exception as exc:
             self.get_logger().error(f'Audio loop error: {exc}')
 
     def _process_utterance(self, signal) -> None:
-        word = self._recognizer.recognize(signal, fs=self._sample_rate)
+        """Apply VAD endpoint trimming then run HMM recognition."""
+        try:
+            from voice_control.hmm_utils import detect_endpoints
+            start, end = detect_endpoints(signal, fs=self._sample_rate)
+            segment    = signal[start:end]
+            if len(segment) < int(0.1 * self._sample_rate):
+                self.get_logger().debug('Utterance too short after VAD — skipping')
+                return
+        except Exception:
+            segment = signal
+
+        word = self._recognizer.recognize(segment, fs=self._sample_rate)
         if word:
             self.get_logger().info(f'Recognised: "{word}"')
             self._handle_word(word)

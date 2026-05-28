@@ -12,7 +12,7 @@ import os
 import numpy as np
 
 from voice_control.hmm_utils import (
-    PALABRAS, FS, extract_mfcc, quantize, HMMBakis,
+    PALABRAS, FS, extract_mfcc, quantize, HMMBakis, detect_endpoints,
 )
 
 
@@ -89,18 +89,24 @@ class HMMRecognizer:
         """Recognise a single utterance.
 
         Args:
-            signal: 1-D float32 audio samples
+            signal: 1-D float32 audio samples (already captured, may include silence)
             fs:     sample rate (default 16 000 Hz)
 
         Returns:
-            Recognised word string, or None if models not loaded / empty signal.
+            Recognised word string, or None if models not loaded / signal too short.
         """
         if not self._ready or self._centroids is None:
             return None
         if len(signal) < 160:
             return None
 
-        mfcc = extract_mfcc(signal.astype(np.float32), fs=fs)
+        # Trim leading/trailing silence before extracting features
+        start, end = detect_endpoints(signal.astype(np.float32), fs=fs)
+        segment = signal[start:end]
+        if len(segment) < int(0.1 * fs):
+            segment = signal  # fallback: use full signal if VAD gives nothing
+
+        mfcc = extract_mfcc(segment.astype(np.float32), fs=fs)
         if len(mfcc) == 0:
             return None
 
