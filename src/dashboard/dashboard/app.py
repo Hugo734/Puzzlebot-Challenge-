@@ -198,16 +198,6 @@ def reset_map():
     return jsonify({"success": ok, "message": msg}), code
 
 
-@app.route("/api/slam/relocalize", methods=["POST"])
-def relocalize():
-    """Re-arm SLAM's global auto-localizer (laser ↔ map alignment)."""
-    if ros_bridge is None:
-        return jsonify({"error": "ROS bridge not initialised"}), 503
-    ok, msg = ros_bridge.call_relocalize()
-    code = 200 if ok else 500
-    return jsonify({"success": ok, "message": msg}), code
-
-
 @app.route("/api/slam/fit_workspace", methods=["POST"])
 def fit_workspace():
     """Auto-fit the workspace rectangle to the currently-mapped walls."""

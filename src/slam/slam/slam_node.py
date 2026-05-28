@@ -39,6 +39,7 @@ from slam.icp import (
     scan_to_points, transform_points, icp,
     voxel_downsample, polar_scan_correlation, scan_diff,
     range_outlier_filter, multi_resolution_csm, global_localization,
+    global_localization_multi, estimate_normals,
 )
 
 
@@ -232,13 +233,53 @@ class SLAMNode(Node):
         # alignments score <150.  180 is in the safe gap.
         self.declare_parameter('auto_localize_min_score',  180.0)
         # Persistent retry: keep trying global localization until either
-        # a scan clears the threshold OR (after this many tries) we snap
-        # to the best hypothesis seen so far and let ICP refine.
-        # 0 = never accept best-of-N (retry forever).
-        self.declare_parameter('auto_localize_max_tries',           20)
+        # a scan clears the quality bar OR (after this many tries) we snap
+        # to the best hypothesis seen so far and let ICP refine.  0 means
+        # "never give up" — the only way out is /relocalize, /initialpose,
+        # or switching to MAPPING mode.
+        self.declare_parameter('auto_localize_max_tries',            0)
         # Throttle between consecutive global-CSM attempts (seconds).
-        # Each attempt is ~100–200 ms, so 2 s keeps CPU headroom.
+        # Each attempt is ~100–300 ms (more with top-K), so 2 s keeps
+        # CPU headroom even on the Jetson Nano.
         self.declare_parameter('auto_localize_retry_period',         2.0)
+
+        # ── Multi-hypothesis search + inlier-ratio acceptance ──
+        # The CSM score (sum of log-odds at scan points) is easy to fool:
+        # a pose where the scan partially overlaps the WRONG wall can
+        # score above the score-threshold even though half the points
+        # land on empty cells (red dots where there are no walls).
+        # Replace the score gate with a geometric one:
+        #
+        #   inlier_ratio = #{scan points within `inlier_dist` of any
+        #                    occupied cell}  /  N_scan_points
+        #
+        # A real fit lands ≥ ~85% inliers at 12 cm tolerance; a wrong-
+        # wall match usually sits at 30-50%.  We also try the top-K
+        # spatially-distinct CSM maxima per attempt and pick the one
+        # with the highest inlier ratio after ICP — this rescues us
+        # from the global-max-but-wrong case.
+        self.declare_parameter('auto_localize_top_k',                  5)
+        self.declare_parameter('auto_localize_min_inlier_ratio',     0.65)
+        self.declare_parameter('auto_localize_inlier_dist',          0.12)  # m
+        # Best-of-N fallback (only used if max_tries > 0): accept only
+        # when the best inlier ratio seen is at least this — a 20%
+        # match isn't worth committing to.
+        self.declare_parameter('auto_localize_fallback_min_inlier', 0.50)
+
+        # ── Runtime localization quality monitor ────────────────
+        # In NAVIGATION mode we keep watching the inlier ratio of the
+        # accepted matches.  When the rolling mean of the last N
+        # samples drops below `loc_rearm_threshold`, we automatically
+        # re-arm the global auto-localizer so the robot recovers from
+        # drift without anyone pressing a button.  Gap between the
+        # acceptance threshold (65 %) and the re-arm threshold (40 %)
+        # gives hysteresis so we don't bounce in and out.
+        self.declare_parameter('loc_quality_check_enabled', True)
+        self.declare_parameter('loc_rearm_threshold',        0.40)
+        self.declare_parameter('loc_rearm_window',           20)   # ~2 s @ 10 Hz
+        # Don't fire the re-arm during the first few scans after a
+        # bypass / particle-recovery — give the matcher time to settle.
+        self.declare_parameter('loc_rearm_cooldown_scans',   30)
         self.declare_parameter('map_yaml',        '')
         self.declare_parameter('initial_x',       0.0)
         self.declare_parameter('initial_y',       0.0)
@@ -424,6 +465,14 @@ class SLAMNode(Node):
         self._last_match_xy_corr   = 0.0
         self._last_match_th_corr   = 0.0
 
+        # Rolling history of recent inlier ratios (NAV-mode quality monitor).
+        loc_window = int(self.get_parameter('loc_rearm_window').value)
+        self._loc_ratio_history = deque(maxlen=max(1, loc_window))
+        # Block the re-arm trigger for this many scans after any
+        # event that could cause a transient drop (auto-localize
+        # snap, particle recovery, mode switch, big rotation bypass).
+        self._loc_rearm_blocked_for = 0
+
         # ── Matcher-target cache ─────────────────────────────────
         # In navigation mode the map never changes — recomputing the
         # local map-cloud + KDTree + normals on every scan is pure
@@ -599,6 +648,10 @@ class SLAMNode(Node):
         # If a manual estimate arrives, treat auto-localize as resolved.
         self._auto_localize_pending = False
         self._set_pose(float(p.x), float(p.y), theta)
+        # Reset the runtime monitor — the just-set pose is the new reference.
+        self._loc_ratio_history.clear()
+        self._loc_rearm_blocked_for = int(
+            self.get_parameter('loc_rearm_cooldown_scans').value)
 
     def _system_mode_cb(self, msg: StringMsg) -> None:
         """Switch between MAPPING (writes the grid) and NAVIGATION (frozen)."""
@@ -610,6 +663,12 @@ class SLAMNode(Node):
         if new_loc == self._localization_mode:
             return
         self._localization_mode = new_loc
+        # Reset the runtime monitor on any mode switch — old samples
+        # were taken under a different regime and would skew the
+        # rolling mean for a while.
+        self._loc_ratio_history.clear()
+        self._loc_rearm_blocked_for = int(
+            self.get_parameter('loc_rearm_cooldown_scans').value)
         if new_loc:
             self.get_logger().info(
                 'Switched to NAVIGATION: map frozen, matcher runs every scan.'
@@ -762,37 +821,225 @@ class SLAMNode(Node):
             response.message = f'reset failed: {exc}'
         return response
 
+    def _runtime_localization_check(self, cloud_base):
+        """
+        Watch localization quality every scan in NAV mode and auto-re-arm
+        the global auto-localizer when it deteriorates.
+
+        Replaces the "Relocate" button: the robot is *always* trying to be
+        well-localized, no human in the loop.  Computes the inlier ratio
+        of the current pose against the cached LOCAL map cloud (cheap —
+        one KDTree query that's already cached for ICP).  Tracks a rolling
+        mean over `loc_rearm_window` scans; when it falls below
+        `loc_rearm_threshold` we set `_auto_localize_pending=True` and the
+        next scan callback runs a fresh multi-hypothesis global search.
+        """
+        if not bool(self.get_parameter('loc_quality_check_enabled').value):
+            return
+        if not self._localization_mode:
+            return                                # mapping: nothing to check against
+        if self._auto_localize_pending:
+            return                                # already re-arming
+        if self._loc_rearm_blocked_for > 0:
+            self._loc_rearm_blocked_for -= 1
+            return                                # cooldown after a snap / bypass
+        if (self._cache_pts is None
+                or self._cache_tree is None
+                or self._cache_mode != 'map'
+                or len(self._cache_pts) < 50):
+            return                                # not enough map evidence yet
+
+        pts_world = transform_points(
+            cloud_base, self._sx, self._sy, self._stheta)
+        # Only score points that lie inside the cached local disc — the
+        # KDTree only knows about walls in there, so a point far outside
+        # would always look like an outlier regardless of pose quality.
+        radius2 = float(self.get_parameter('icp_map_radius').value) ** 2
+        in_disc = ((pts_world[:, 0] - self._cache_rx) ** 2
+                   + (pts_world[:, 1] - self._cache_ry) ** 2) <= radius2
+        if int(np.count_nonzero(in_disc)) < 30:
+            return
+
+        dists, _ = self._cache_tree.query(pts_world[in_disc], k=1)
+        inlier_dist = float(self.get_parameter('auto_localize_inlier_dist').value)
+        ratio = float(np.mean(dists < inlier_dist))
+        self._loc_ratio_history.append(ratio)
+
+        window = int(self.get_parameter('loc_rearm_window').value)
+        if len(self._loc_ratio_history) < window:
+            return
+
+        avg   = float(np.mean(self._loc_ratio_history))
+        rearm = float(self.get_parameter('loc_rearm_threshold').value)
+        if avg < rearm:
+            self.get_logger().warn(
+                f'Localization quality drop: rolling inliers '
+                f'{avg*100:.1f}% < {rearm*100:.0f}% over last '
+                f'{window} scans — auto-re-arming global localizer.')
+            self._auto_localize_pending     = True
+            self._auto_localize_tries       = 0
+            self._auto_localize_best        = None
+            self._auto_localize_last_attempt = 0.0
+            self._loc_ratio_history.clear()
+            self._loc_rearm_blocked_for = int(
+                self.get_parameter('loc_rearm_cooldown_scans').value)
+
+    def _inlier_ratio(self, cloud_base, pose, inlier_dist, map_tree):
+        """
+        Fraction of scan points (after transforming to world frame via
+        `pose`) that land within `inlier_dist` of *any* occupied wall
+        cell.  This is the geometric quality metric the auto-localizer
+        uses to gate acceptance — high inlier ratio means "no red dots
+        where there are no walls."  Requires a pre-built cKDTree over
+        the wall cells (caller responsibility — avoids rebuilding the
+        tree once per candidate hypothesis).
+        """
+        if map_tree is None or len(cloud_base) == 0:
+            return 0.0
+        x, y, th = pose
+        pts = transform_points(cloud_base, x, y, th)
+        dists, _ = map_tree.query(pts, k=1)
+        return float(np.mean(dists < inlier_dist))
+
     def _try_auto_localize(self, cloud) -> bool:
         """
-        Run a 3-stage coarse-to-fine global scan-to-map search and snap
-        the SLAM pose to the winning hypothesis if its score clears
-        `auto_localize_min_score`.  Returns True iff the pose was set.
+        Multi-hypothesis global localisation + inlier-ratio acceptance.
+
+        Strategy: a single CSM run sometimes locks onto the wrong wall
+        and produces a high score with a geometrically-bad pose (scan
+        points landing where there is no wall).  Instead of trusting
+        the score-max we:
+
+          1.  Run the 3-stage global CSM in TOP-K mode (returns the K
+              spatially-distinct best hypotheses, not just the global
+              argmax).
+          2.  Refine EACH hypothesis with ICP against its local map
+              cloud.
+          3.  Score each refined pose by inlier ratio (% scan points
+              within `inlier_dist` of any occupied cell).
+          4.  Accept the candidate with the highest inlier ratio iff
+              it clears `auto_localize_min_inlier_ratio`.  Otherwise
+              return False and let the throttled-retry loop call us
+              again on the next scan.
+
+        Returns True iff the SLAM pose was snapped to a winner.
         """
-        xy_step    = self.get_parameter('auto_localize_xy_step').value
-        th_step_d  = self.get_parameter('auto_localize_th_step_deg').value
-        min_score  = self.get_parameter('auto_localize_min_score').value
+        xy_step          = float(self.get_parameter('auto_localize_xy_step').value)
+        th_step_d        = float(self.get_parameter('auto_localize_th_step_deg').value)
+        top_k            = int(self.get_parameter('auto_localize_top_k').value)
+        min_inlier_ratio = float(self.get_parameter('auto_localize_min_inlier_ratio').value)
+        inlier_dist      = float(self.get_parameter('auto_localize_inlier_dist').value)
+        icp_max_iter     = int(self.get_parameter('icp_max_iter').value)
+        icp_min_pts      = int(self.get_parameter('icp_min_points').value)
+        map_radius       = float(self.get_parameter('icp_map_radius').value)
+        threshold_disp   = float(self.grid.display_l_occ)
+        icp_thresh       = float(self.get_parameter('icp_map_occ_threshold').value)
+        if icp_thresh < 0.0:
+            icp_thresh = threshold_disp
+
         t0 = self.get_clock().now()
-        (x, y, th), score = global_localization(
+
+        # ── Build the GLOBAL wall cloud + KDTree once per attempt ──
+        # Used as the reference for inlier-ratio scoring (whole map,
+        # not just a local disc, because at this stage we don't yet
+        # know which corner of the room the robot is in).
+        map_pts_all = self.grid.get_occupied_points(threshold=threshold_disp)
+        if len(map_pts_all) < 50 or not _HAS_KDTREE:
+            self.get_logger().warn(
+                f'Auto-localize: map too sparse for global match '
+                f'({len(map_pts_all)} cells); will retry.')
+            return False
+        map_tree_all = cKDTree(map_pts_all)
+
+        # ── Stage 1: multi-hypothesis global CSM ────────────────
+        candidates = global_localization_multi(
             self.grid, cloud,
             xy_step=xy_step, th_step_deg=th_step_d,
+            top_k=top_k,
+            exclude_xy_radius=1.0,
             score_floor=0.0)
-        dt_ms = (self.get_clock().now() - t0).nanoseconds * 1e-6
-        # Track best hypothesis across attempts so the throttled-retry loop
-        # can fall back to it if the threshold is never cleared.
-        if (self._auto_localize_best is None
-                or score > self._auto_localize_best[3]):
-            self._auto_localize_best = (float(x), float(y), float(th), float(score))
+        if not candidates:
+            return False
 
-        if score < min_score:
+        # ── Stage 2: ICP refine + inlier ratio per candidate ────
+        best_pose   = None
+        best_ratio  = -1.0
+        best_fit    = float('inf')
+        best_score  = 0.0
+        per_cand_logs = []
+
+        for (cand_pose, cand_score) in candidates:
+            cx, cy, cth = cand_pose
+            map_pts_local = self.grid.get_occupied_points(
+                robot_x=cx, robot_y=cy,
+                radius=map_radius,
+                threshold=icp_thresh)
+            if len(map_pts_local) < icp_min_pts:
+                per_cand_logs.append(
+                    f'({cx:+.2f},{cy:+.2f},{math.degrees(cth):+.1f}°) skipped '
+                    f'(only {len(map_pts_local)} local map pts)')
+                continue
+            local_tree    = cKDTree(map_pts_local)
+            local_normals = estimate_normals(
+                map_pts_local,
+                k=int(self.get_parameter('icp_normal_neighbors').value),
+                tree=local_tree)
+
+            cloud_world = transform_points(cloud, cx, cy, cth)
+            dx, dy, dth_corr, fitness, _ = icp(
+                source=cloud_world,
+                target=map_pts_local,
+                init_dx=0.0, init_dy=0.0, init_dtheta=0.0,
+                max_iter=icp_max_iter,
+                tolerance=float(self.get_parameter('icp_tolerance').value),
+                reject_dist=float(self.get_parameter('icp_reject_dist').value),
+                min_points=icp_min_pts,
+                use_point_to_line=bool(self.get_parameter('icp_use_point_to_line').value),
+                target_tree=local_tree,
+                target_normals=local_normals,
+            )
+            ref_x, ref_y, ref_th = _se2_compose(
+                (float(dx), float(dy), float(dth_corr)),
+                (float(cx), float(cy), float(cth)))
+            ratio = self._inlier_ratio(
+                cloud, (ref_x, ref_y, ref_th), inlier_dist, map_tree_all)
+
+            per_cand_logs.append(
+                f'({ref_x:+.2f},{ref_y:+.2f},{math.degrees(ref_th):+.1f}°) '
+                f'score={cand_score:.0f}  fit={fitness:.3f}  '
+                f'inliers={ratio*100:.1f}%')
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_pose  = (ref_x, ref_y, ref_th)
+                best_fit   = fitness
+                best_score = cand_score
+
+        dt_ms = (self.get_clock().now() - t0).nanoseconds * 1e-6
+
+        # ── Track best-ever across attempts (inlier-ratio sorted) ──
+        if best_pose is not None and (
+                self._auto_localize_best is None
+                or best_ratio > self._auto_localize_best[3]):
+            self._auto_localize_best = (
+                float(best_pose[0]), float(best_pose[1]),
+                float(best_pose[2]), float(best_ratio))
+
+        if best_pose is None or best_ratio < min_inlier_ratio:
+            cand_log = ' | '.join(per_cand_logs) if per_cand_logs else 'none viable'
             self.get_logger().warn(
                 f'Auto-localize attempt {self._auto_localize_tries + 1}: '
-                f'best pose=({x:+.2f}, {y:+.2f}, {math.degrees(th):+.1f}°)  '
-                f'score={score:.1f} < {min_score:.1f}  ({dt_ms:.0f} ms)')
+                f'best inliers={best_ratio*100:.1f}% < target '
+                f'{min_inlier_ratio*100:.0f}%  ({dt_ms:.0f} ms)  '
+                f'[K={len(candidates)}]  {cand_log}')
             return False
+
         self.get_logger().info(
-            f'Auto-localized in {dt_ms:.0f} ms → pose=({x:+.2f}, {y:+.2f}, '
-            f'{math.degrees(th):+.1f}°)  score={score:.1f}')
-        self._set_pose(float(x), float(y), float(th))
+            f'Auto-localized in {dt_ms:.0f} ms → pose=({best_pose[0]:+.2f}, '
+            f'{best_pose[1]:+.2f}, {math.degrees(best_pose[2]):+.1f}°)  '
+            f'inliers={best_ratio*100:.1f}%  fit={best_fit:.3f}  '
+            f'score={best_score:.0f}  (best of {len(candidates)} candidates)')
+        self._set_pose(float(best_pose[0]), float(best_pose[1]), float(best_pose[2]))
         return True
 
     # ──────────────────────────────────────────────────────────────
@@ -1029,21 +1276,43 @@ class SLAMNode(Node):
                     self._auto_localize_pending = False
                     self._auto_localize_tries = 0
                     self._auto_localize_best = None
+                    self._loc_ratio_history.clear()
+                    self._loc_rearm_blocked_for = int(
+                        self.get_parameter('loc_rearm_cooldown_scans').value)
                 else:
                     self._auto_localize_tries += 1
                     max_tries = int(self.get_parameter('auto_localize_max_tries').value)
+                    fb_min    = float(self.get_parameter(
+                        'auto_localize_fallback_min_inlier').value)
                     if (max_tries > 0
                             and self._auto_localize_tries >= max_tries
-                            and self._auto_localize_best is not None):
-                        bx, by, bth, bscore = self._auto_localize_best
+                            and self._auto_localize_best is not None
+                            and self._auto_localize_best[3] >= fb_min):
+                        bx, by, bth, bratio = self._auto_localize_best
                         self.get_logger().warn(
-                            f'Auto-localize: threshold not cleared in '
+                            f'Auto-localize: target not reached in '
                             f'{self._auto_localize_tries} tries — accepting '
                             f'best-of pose ({bx:+.2f}, {by:+.2f}, '
-                            f'{math.degrees(bth):+.1f}°)  score={bscore:.1f}. '
+                            f'{math.degrees(bth):+.1f}°)  '
+                            f'inliers={bratio*100:.1f}% (≥ '
+                            f'fallback {fb_min*100:.0f}%).  '
                             f'ICP will refine from here.')
                         self._set_pose(bx, by, bth)
                         self._auto_localize_pending = False
+                        self._auto_localize_tries = 0
+                        self._auto_localize_best = None
+                    elif (max_tries > 0
+                            and self._auto_localize_tries >= max_tries):
+                        # Best-of-N didn't even clear the fallback floor —
+                        # reset the counter and KEEP retrying.  Better to
+                        # stay unlocalised than commit to a wrong pose.
+                        bratio = (self._auto_localize_best[3]
+                                   if self._auto_localize_best else 0.0)
+                        self.get_logger().warn(
+                            f'Auto-localize: best inliers={bratio*100:.1f}% '
+                            f'after {self._auto_localize_tries} tries < '
+                            f'fallback floor {fb_min*100:.0f}%.  '
+                            f'Resetting counter — continuing to retry.')
                         self._auto_localize_tries = 0
                         self._auto_localize_best = None
             now = self.get_clock().now().to_msg()
@@ -1123,6 +1392,21 @@ class SLAMNode(Node):
                 scan_omega, scan_dur,
                 ray_dx=ray_dx, ray_dy=ray_dy, ray_dth=ray_dth,
                 matcher_rejected=matcher_rejected)
+        else:
+            # Bypassed scans add lots of drift — protect the runtime
+            # monitor from spurious re-arms until the matcher has caught up.
+            self._loc_rearm_blocked_for = max(
+                self._loc_rearm_blocked_for,
+                int(self.get_parameter('loc_rearm_cooldown_scans').value))
+
+        # ── Runtime localization-quality monitor (NAV mode) ─────
+        # Replaces the dashboard "Relocate" button: every accepted match
+        # adds an inlier-ratio sample; if the rolling mean drops below
+        # threshold, we auto-re-arm the global localizer.  Only fires
+        # when the matcher actually ran AND committed (matcher_ok),
+        # otherwise the ratio reflects the OLD pose, not the current one.
+        if matcher_ok and not bypassed:
+            self._runtime_localization_check(cloud)
 
         # ── Publish ──────────────────────────────────────────────
         now = self.get_clock().now().to_msg()

@@ -353,6 +353,146 @@ def multi_resolution_csm(grid, cloud_base, init_pose,
     return (fx, fy, fth), fs_score
 
 
+def correlative_scan_match_topk(grid, cloud_base, init_pose,
+                                xy_radius, xy_step,
+                                th_radius, th_step,
+                                top_k=5,
+                                exclude_xy_radius=1.0,
+                                exclude_th_radius=None,
+                                score_floor=0.0):
+    """
+    Like ``correlative_scan_match`` but returns the top-K spatially-
+    distinct maxima instead of just the global one.
+
+    After each maximum is extracted, a neighbourhood of size
+    ``exclude_xy_radius`` (m) × ``exclude_th_radius`` (rad) is zeroed
+    in the score volume before the next argmax — this guarantees the
+    K hypotheses are physically distinct candidates and not three
+    copies of the same wall match shifted by one cell.
+
+    Returns a list of ``(x, y, theta, score)`` tuples sorted by score
+    descending.  Length ≤ top_k (less when the score volume runs out
+    of positive maxima or the exclusion zone has eaten everything).
+    """
+    x0, y0, th0 = init_pose
+    if exclude_th_radius is None:
+        exclude_th_radius = 3.0 * th_step
+
+    dxs  = np.arange(-xy_radius, xy_radius + xy_step / 2.0, xy_step,  dtype=np.float64)
+    dys  = np.arange(-xy_radius, xy_radius + xy_step / 2.0, xy_step,  dtype=np.float64)
+    dths = np.arange(-th_radius, th_radius + th_step / 2.0, th_step,  dtype=np.float64)
+
+    res      = grid.resolution
+    dx_cells = np.round(dxs / res).astype(np.int32)
+    dy_cells = np.round(dys / res).astype(np.int32)
+
+    # Full (Nth, Nx, Ny) score volume — same inner kernel as the
+    # single-best version, just persisted across θ instead of reduced.
+    score_3d = np.full((len(dths), len(dxs), len(dys)), -np.inf, dtype=np.float64)
+    for k_th, dth in enumerate(dths):
+        c, s = math.cos(th0 + dth), math.sin(th0 + dth)
+        rot_x = c * cloud_base[:, 0] - s * cloud_base[:, 1]
+        rot_y = s * cloud_base[:, 0] + c * cloud_base[:, 1]
+        cx_base = np.floor(((rot_x + x0) - grid.origin_x) / res).astype(np.int32)
+        cy_base = np.floor(((rot_y + y0) - grid.origin_y) / res).astype(np.int32)
+        cx = cx_base[None, None, :] + dx_cells[:, None, None]
+        cy = cy_base[None, None, :] + dy_cells[None, :, None]
+        in_b = (cx >= 0) & (cx < grid.width) & (cy >= 0) & (cy < grid.height)
+        cx_safe = np.clip(cx, 0, grid.width  - 1)
+        cy_safe = np.clip(cy, 0, grid.height - 1)
+        vals = grid._log[np.broadcast_to(cy_safe, (len(dx_cells), len(dy_cells), len(cx_base))),
+                         np.broadcast_to(cx_safe, (len(dx_cells), len(dy_cells), len(cx_base)))]
+        np.maximum(vals, score_floor, out=vals)
+        vals = vals * in_b
+        score_3d[k_th] = vals.sum(axis=2)
+
+    excl_xy = max(1, int(round(exclude_xy_radius / xy_step)))
+    excl_th = max(1, int(round(exclude_th_radius / th_step)))
+    results = []
+    scratch = score_3d.copy()
+    for _ in range(top_k):
+        idx = int(np.argmax(scratch))
+        flat_max = float(scratch.flat[idx])
+        if not np.isfinite(flat_max) or flat_max <= 0.0:
+            break
+        k_th, ij = divmod(idx, scratch.shape[1] * scratch.shape[2])
+        i_x, i_y = divmod(ij, scratch.shape[2])
+        results.append((
+            x0 + float(dxs[i_x]),
+            y0 + float(dys[i_y]),
+            math.atan2(math.sin(th0 + float(dths[k_th])),
+                       math.cos(th0 + float(dths[k_th]))),
+            flat_max,
+        ))
+        k0 = max(0,                  k_th - excl_th)
+        k1 = min(scratch.shape[0],   k_th + excl_th + 1)
+        i0 = max(0,                  i_x  - excl_xy)
+        i1 = min(scratch.shape[1],   i_x  + excl_xy + 1)
+        j0 = max(0,                  i_y  - excl_xy)
+        j1 = min(scratch.shape[2],   i_y  + excl_xy + 1)
+        scratch[k0:k1, i0:i1, j0:j1] = -np.inf
+
+    return results
+
+
+def global_localization_multi(grid, cloud_base,
+                              xy_step=0.30, th_step_deg=8.0,
+                              top_k=5,
+                              exclude_xy_radius=1.0,
+                              score_floor=0.0):
+    """
+    Multi-hypothesis global localisation.  Stage 1 sweeps the whole map
+    × ±180° and returns the top-K spatially-distinct maxima; stages 2
+    & 3 then refine each candidate independently with the same coarse-
+    to-fine schedule as :func:`global_localization`.
+
+    The caller is expected to verify the winning candidate with a
+    quality metric the score itself cannot detect — e.g. inlier
+    ratio against the wall cloud.  The score (sum of log-odds at
+    scan points) is high enough to be a useful ranking signal but
+    cannot tell a genuine match from a partial one against the
+    wrong wall.
+
+    Returns a list of ``((x, y, theta), score)`` sorted by score
+    descending.  May be empty if Stage 1 found nothing positive.
+    """
+    half_w    = (grid.width  * grid.resolution) / 2.0
+    half_h    = (grid.height * grid.resolution) / 2.0
+    radius_xy = max(half_w, half_h)
+    th_step   = math.radians(th_step_deg)
+    center    = (grid.origin_x + half_w, grid.origin_y + half_h, 0.0)
+
+    coarse = correlative_scan_match_topk(
+        grid, cloud_base, center,
+        xy_radius=radius_xy, xy_step=xy_step,
+        th_radius=math.pi,   th_step=th_step,
+        top_k=top_k,
+        exclude_xy_radius=exclude_xy_radius,
+        exclude_th_radius=0.5,                   # ±29° between candidates
+        score_floor=score_floor)
+    if not coarse:
+        return []
+
+    refined = []
+    for (cx, cy, cth, _cs) in coarse:
+        # Stage 2 — refine around the coarse winner
+        c2_x, c2_y, c2_th, _c2_s = correlative_scan_match(
+            grid, cloud_base, (cx, cy, cth),
+            xy_radius=xy_step,        xy_step=xy_step / 3.0,
+            th_radius=th_step,        th_step=th_step / 3.0,
+            score_floor=score_floor)
+        # Stage 3 — fine
+        f_x, f_y, f_th, f_score = correlative_scan_match(
+            grid, cloud_base, (c2_x, c2_y, c2_th),
+            xy_radius=xy_step / 3.0,  xy_step=grid.resolution,
+            th_radius=th_step / 3.0,  th_step=math.radians(1.0),
+            score_floor=score_floor)
+        refined.append(((f_x, f_y, f_th), float(f_score)))
+
+    refined.sort(key=lambda r: -r[1])
+    return refined
+
+
 def global_localization(grid, cloud_base,
                         xy_step=0.30, th_step_deg=8.0,
                         center=None,

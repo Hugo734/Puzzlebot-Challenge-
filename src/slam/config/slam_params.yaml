@@ -264,3 +264,48 @@ slam_node:
 
     # ── Base frame (TF) ──────────────────────────────────────────
     base_frame: base_link
+
+    # ── Auto-localization (preloaded map mode) ───────────────────
+    # When a saved map is loaded, the SLAM node runs a global search
+    # to find the robot's pose anywhere in the map.  Now uses
+    # multi-hypothesis CSM + ICP refinement + inlier-ratio acceptance
+    # so it can't get fooled by a partial wrong-wall match (score
+    # alone is unreliable for that — the score can be high while the
+    # scan visibly disagrees with the map).
+    #
+    # The acceptance test is geometric:
+    #   inlier_ratio = #{scan points within  auto_localize_inlier_dist
+    #                    of any occupied wall cell}  /  N_scan_points
+    # A real match lands ≥ ~85% at 12 cm; we accept at 65%.
+    auto_localize:                       true
+    auto_localize_xy_step:               0.30   # m (stage-1 grid step)
+    auto_localize_th_step_deg:           8.0
+    # Number of spatially-distinct CSM maxima refined per attempt.
+    # Higher = more chances to catch the right pose when the global
+    # argmax is a wrong-wall lookalike.  5 is a sweet spot — covers
+    # the room's 4 rotational symmetries plus one tie-breaker.
+    auto_localize_top_k:                 5
+    # Geometric quality gate:
+    auto_localize_min_inlier_ratio:      0.65   # 65 % of scan points
+    auto_localize_inlier_dist:           0.12   # within 12 cm of a wall
+    # Best-of-N fallback (only fires when max_tries > 0):
+    auto_localize_fallback_min_inlier:   0.50
+    # 0 = never give up.  Use /relocalize or /initialpose to abort.
+    auto_localize_max_tries:             0
+    auto_localize_retry_period:          2.0    # seconds between attempts
+    # Legacy score-based gate (kept as a diagnostic, no longer the
+    # primary acceptance test).
+    auto_localize_min_score:             180.0
+
+    # ── Runtime localization quality monitor ──────────────────────
+    # In NAVIGATION mode, after every accepted match we sample the
+    # inlier ratio against the local cached map cloud.  When the
+    # rolling mean of the last N samples falls below the rearm
+    # threshold, we automatically re-arm the global localizer — no
+    # button press needed.  Hysteresis: acceptance threshold above
+    # (65 %) is well separated from the re-arm threshold (40 %) to
+    # avoid bouncing.
+    loc_quality_check_enabled:           true
+    loc_rearm_threshold:                 0.40
+    loc_rearm_window:                    20      # ≈ 2 s @ 10 Hz
+    loc_rearm_cooldown_scans:            30      # block re-arm right after a snap

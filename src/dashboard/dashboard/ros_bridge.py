@@ -120,7 +120,6 @@ class RosBridge:
         from std_srvs.srv import Trigger
         self._save_map_cli   = self._node.create_client(Trigger, '/map_saver/save_map')
         self._reset_map_cli  = self._node.create_client(Trigger, '/slam_node/reset_map')
-        self._relocalize_cli = self._node.create_client(Trigger, '/slam_node/relocalize')
         self._fit_ws_cli     = self._node.create_client(Trigger, '/slam_node/auto_fit_workspace')
         self._reload_wps_cli = self._node.create_client(Trigger, '/nav_node/reload_waypoints')
 
@@ -304,9 +303,6 @@ class RosBridge:
 
     def call_reset_map(self) -> tuple[bool, str]:
         return self._call_trigger(self._reset_map_cli, 'reset_map', timeout=2.0)
-
-    def call_relocalize(self) -> tuple[bool, str]:
-        return self._call_trigger(self._relocalize_cli, 'relocalize', timeout=2.0)
 
     def call_auto_fit_workspace(self) -> tuple[bool, str]:
         return self._call_trigger(self._fit_ws_cli, 'auto_fit_workspace', timeout=10.0)
