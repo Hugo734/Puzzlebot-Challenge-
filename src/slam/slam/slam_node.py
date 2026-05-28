@@ -563,6 +563,17 @@ class SLAMNode(Node):
                 'Switched to NAVIGATION: map frozen, matcher runs every scan.'
             )
         else:
+            # Switching to MAPPING: cancel any pending auto-localization.
+            # In MAPPING we're either continuing on a known pose (fine)
+            # or starting from scratch (no map to localize against).
+            # Either way, waiting on auto-localize blocks scan integration.
+            if self._auto_localize_pending:
+                self._auto_localize_pending = False
+                self._auto_localize_tries = 0
+                self._auto_localize_best = None
+                self.get_logger().info(
+                    'Auto-localize cancelled (mode → MAPPING).'
+                )
             self.get_logger().info(
                 'Switched to MAPPING: grid updates re-enabled.'
             )
@@ -600,7 +611,18 @@ class SLAMNode(Node):
             self._last_map_y = 0.0
             self._last_map_theta = 0.0
             self._map_dirty = True
-            self.get_logger().info('Occupancy grid reset to empty (unknown).')
+            # Cancel any pending auto-localization.  With an empty grid
+            # there is nothing to match against, so the scan callback
+            # would otherwise stay in the auto-localize gate forever
+            # (early-return before integrating) and no mapping would
+            # happen.  The robot's current SLAM pose becomes the origin
+            # of the new map.
+            self._auto_localize_pending = False
+            self._auto_localize_tries = 0
+            self._auto_localize_best = None
+            self.get_logger().info(
+                'Occupancy grid reset to empty (unknown); auto-localize cancelled.'
+            )
             response.success = True
             response.message = 'grid cleared'
         except Exception as exc:

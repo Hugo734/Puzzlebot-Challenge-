@@ -4,21 +4,33 @@ nav_node:
     map_yaml: ~/ros2_maps/warehouse.yaml
     waypoints_yaml: ~/ros2_maps/waypoints.yaml
 
-    # Obstacle inflation radius for A* grid (m).  Was 0.30 — caused
-    # waypoints near walls (e.g. vic) to be marked unreachable.  At
-    # 0.20 m the robot (≈ 20 cm wide) still has ~10 cm safety margin
-    # but tight goals near walls become reachable.
-    inflation_radius: 0.20
+    # Obstacle inflation radius for A* grid (m).  With the runtime safety
+    # bubble OFF (enable_safety_bubble: false), this IS the safety margin
+    # — the path is the contract.  Set high enough that paths stay away
+    # from walls.  If specific goals become unreachable (very narrow
+    # passages), the fallback ladder steps down to inflation_radius_min
+    # before giving up.
+    inflation_radius: 0.30
+    # Hard floor for the A* fallback inflation ladder.  Bumped 0.10 → 0.15
+    # to give the robot meaningful clearance even on tight goals.  Robot
+    # is ≈ 0.20 m wide; 15 cm of margin = 5 cm of physical clearance after
+    # accounting for the robot's own radius.  The fallback ladder REFUSES
+    # to drop below this and returns "no path" instead.
+    inflation_radius_min: 0.15
 
     # Forward speed (m/s)
-    linear_speed: 0.15
+    linear_speed: 0.10
 
     # Pure-pursuit angular PID
     angular_kp: 2.0
     angular_max: 1.2
 
-    # Distance (m) to declare the final goal reached
-    goal_tolerance: 0.20
+    # Distance (m) to declare the final goal reached.
+    # Tightened from 0.20 → 0.08 so waypoints are docked precisely.
+    # The pure-pursuit controller already scales speed by min(1, dist/0.5)
+    # so it creeps in slowly under 0.5 m, and reverse-maneuver is enabled
+    # (allow_reverse=true) to correct overshoot, so 8 cm is achievable.
+    goal_tolerance: 0.08
 
     # Lookahead distance for pure-pursuit (m)
     lookahead_distance: 0.40
@@ -26,8 +38,9 @@ nav_node:
     # Control loop rate (Hz)
     control_rate: 10.0
 
-    # Heading alignment at goal
-    heading_tolerance: 0.12   # rad (~7°) — in-place rotation stops when within this
+    # Heading alignment at goal.  Tightened 0.12 → 0.08 rad (~4.6°) so
+    # the dock pose matches the saved waypoint heading more precisely.
+    heading_tolerance: 0.08   # rad
 
     # Bug1 obstacle avoidance
     obstacle_distance: 0.50   # front-arc stop threshold (m) — wider for thin legs
@@ -66,14 +79,14 @@ nav_node:
     # obstacles detected in the costmap.
     enable_validity_replan:      false
 
-    # ── 360° safety bubble (emergency STOP, FOLLOWING state only) ─────
-    # MAX bubble radius — used when path is planned with full inflation.
-    # The effective radius at runtime is min(safety_bubble_radius,
-    # plan_time_inflation), clamped to safety_bubble_min.  This means
-    # the bubble shrinks to match tight paths so it never fires on the
-    # walls the planner already routed around.
-    safety_bubble_radius:        0.20  # m
-    safety_bubble_min:           0.07  # m  hard floor
+    # ── Runtime safety bubble (off by default) ────────────────────────
+    # Margen ahora viene del `inflation_radius` del planeador, no de un
+    # check runtime que se confundía con ruido del LiDAR y frenaba al
+    # robot en abierto.  Cambia a true si quieres reactivar la detección
+    # runtime para obstáculos dinámicos (personas, cosas en movimiento).
+    enable_safety_bubble:        false
+    safety_bubble_radius:        0.30  # m  (techo, sólo si enable=true)
+    safety_bubble_min:           0.15  # m  (piso,  sólo si enable=true)
 
     # ── Dynamic-obstacle wait policy ──────────────────────────────────
     # When the safety bubble fires, wait this long (retrying replan

@@ -79,6 +79,13 @@ class NavNode(Node):
         self.declare_parameter('map_yaml',            '~/ros2_maps/warehouse.yaml')
         self.declare_parameter('waypoints_yaml',      '~/ros2_maps/waypoints.yaml')
         self.declare_parameter('inflation_radius',    0.30)
+        # Hard floor for A* fallback inflation.  Paths planned with less
+        # inflation than this would put the robot literally inside or
+        # next to walls — the fallback ladder will REFUSE to drop below
+        # this value.  Default = robot physical radius (~10 cm) so we
+        # never produce a path that the robot's body can't physically
+        # clear.
+        self.declare_parameter('inflation_radius_min', 0.10)
         self.declare_parameter('linear_speed',        0.15)
         self.declare_parameter('angular_kp',          2.0)
         self.declare_parameter('angular_max',         1.2)
@@ -130,16 +137,25 @@ class NavNode(Node):
         # tically re-plan around obstacles its costmap discovers en route.
         self.declare_parameter('enable_validity_replan', False)
 
-        # ── 360° safety bubble ────────────────────────────────────────
-        # Max bubble used when the path has full inflation.  The effective
-        # bubble shrinks to match the plan-time inflation when fallback
-        # had to use a tighter path, so the bubble never fires on the
-        # walls the planner already routed around.
-        self.declare_parameter('safety_bubble_radius', 0.20)
-        # Floor for the bubble even when plan inflation went to 0 — keeps
-        # the robot from literally touching anything.  ~half a robot
-        # radius.
-        self.declare_parameter('safety_bubble_min',    0.07)
+        # ── Runtime safety bubble (OFF by default) ────────────────────
+        # The safety bubble is OFF by default because the user's intent
+        # is "give me extra margin at PLAN time so the path itself stays
+        # away from walls" — that's what `inflation_radius` does.  The
+        # bubble fired on spurious LiDAR rays in the middle of an open
+        # area, stopping the robot for no reason.  Set enable_safety_
+        # bubble: true to re-enable as a runtime check against dynamic
+        # obstacles (people walking in front, things rolling into the
+        # path).  When enabled, bubble radius is clamped between
+        # safety_bubble_min and safety_bubble_radius based on the path's
+        # plan-time inflation.
+        self.declare_parameter('enable_safety_bubble',     False)
+        self.declare_parameter('safety_bubble_radius',     0.25)
+        self.declare_parameter('safety_bubble_min',        0.10)
+        # Hysteresis (ticks of consecutive breach before entering WAIT)
+        # and min ray count for a tick to COUNT as breached.  Only
+        # relevant when enable_safety_bubble: true.
+        self.declare_parameter('bubble_breach_hysteresis', 5)
+        self.declare_parameter('bubble_min_ray_count',     3)
         # When false (default) the robot does NOT fall back to Bug1 if the
         # WAIT-for-clear timeout expires.  In a fully-mapped environment
         # Bug1's wall-follow rarely helps (the planner already routed
@@ -231,11 +247,17 @@ class NavNode(Node):
         # gate validity-triggered replans so we don't thrash.
         self._last_replan_time: Optional[float] = None
 
+        # Safety-bubble debouncing: count consecutive ticks the bubble
+        # has been violated while FOLLOWING.  We only enter WAIT after
+        # this exceeds `bubble_breach_hysteresis`.
+        self._bubble_breach_ticks: int = 0
+
         # Path-validity hysteresis counter (consecutive blocked ticks)
         self._path_blocked_ticks: int = 0
 
         # WAITING_FOR_CLEAR bookkeeping
         self._wait_start_time: float = 0.0
+        self._wait_last_replan_try: float = 0.0
 
         # ── QoS ────────────────────────────────────────────────────────
         reliable_qos = QoSProfile(
@@ -412,9 +434,16 @@ class NavNode(Node):
             return
 
         self._publish_status('PLANNING')
-        planning_grid = self._grid_with_live_scan(
-            self._pose_x, self._pose_y, self._pose_theta
-        )
+        # Plan over the STATIC map only — without the local LiDAR costmap
+        # overlay.  The costmap accumulates transient hits within a 2 m
+        # radius and frequently adds phantom obstacles (glancing wall
+        # rays, dust, etc.) that force A* into long detours.  We want
+        # the SHORTEST geometrically-valid path at goal time.  If a real
+        # dynamic obstacle is in the way, the safety bubble triggers
+        # WAITING_FOR_CLEAR, which calls _replan_from_current — and that
+        # path DOES include the live costmap so it goes around the
+        # blocker.  Best of both worlds.
+        planning_grid = self._grid if self._grid is not None else None
         path = self._plan_with_fallback(
             planning_grid,
             self._pose_x, self._pose_y, goal_x, goal_y,
@@ -451,20 +480,33 @@ class NavNode(Node):
         px, py, theta = self._pose_x, self._pose_y, self._pose_theta
 
         # ── 360° safety bubble: emergency stop ONLY in FOLLOWING ──
-        # Pure pursuit doesn't look sideways, so we add a 360° bubble to
-        # catch sudden close obstacles.  In WALL_FOLLOWING / RETURNING_
-        # LEAVE the Bug1 controller has its own front-arc obstacle
-        # awareness (obstacle_distance) and ALREADY assumes it's close
-        # to walls — the global bubble there caused a deadlock loop
-        # (Bug1 → bubble breach → WAIT → Bug1 → breach → …) because the
-        # robot was wedged near a rack and Bug1 needed room to manoeuvre.
-        if self._state == _State.FOLLOWING and self._safety_bubble_violated():
-            self._publish_stop()
-            self.get_logger().warn(
-                'Safety bubble breached — emergency STOP, entering WAITING_FOR_CLEAR'
-            )
-            self._enter_waiting(px, py)
-            return
+        # Skipped entirely when enable_safety_bubble is False (default):
+        # the user prefers the safety margin to come from the planner's
+        # `inflation_radius`, not from runtime LiDAR-vs-path checks that
+        # over-fire on noise.
+        if (self._state == _State.FOLLOWING
+                and bool(self.get_parameter('enable_safety_bubble').value)):
+            if self._safety_bubble_violated():
+                self._bubble_breach_ticks += 1
+                hyst = int(self.get_parameter('bubble_breach_hysteresis').value)
+                if self._bubble_breach_ticks >= hyst:
+                    self._publish_stop()
+                    self.get_logger().warn(
+                        f'Safety bubble breached for {self._bubble_breach_ticks} '
+                        'ticks — entering WAITING_FOR_CLEAR'
+                    )
+                    self._bubble_breach_ticks = 0
+                    self._enter_waiting(px, py)
+                    return
+                # Below the hysteresis threshold: stop motion this tick
+                # but keep the FOLLOWING state so we resume next tick if
+                # the breach clears.
+                self._publish_stop()
+                return
+            else:
+                # Bubble clear — reset the counter and continue with the
+                # normal FOLLOWING control logic below.
+                self._bubble_breach_ticks = 0
 
         if self._state == _State.WAITING_FOR_CLEAR:
             self._waiting_update(px, py)
@@ -594,31 +636,62 @@ class NavNode(Node):
         """Stop the robot and start the wait-for-clear timer."""
         self._publish_stop()
         self._wait_start_time = self.get_clock().now().nanoseconds * 1e-9
+        self._wait_last_replan_try = 0.0
         self._path_blocked_ticks = 0
         self._state = _State.WAITING_FOR_CLEAR
         self._publish_status(f'WAITING_FOR_CLEAR: {self._current_goal_name}')
         self.get_logger().info(
-            f'Pausing up to {self.get_parameter("wait_for_clear_timeout").value:.1f} s '
-            'for path to clear before falling back to Bug1.'
+            f'Pausing up to {self.get_parameter("wait_for_clear_timeout").value:.1f} s, '
+            'attempting replan around obstacle.'
         )
 
     def _waiting_update(self, px: float, py: float) -> None:
-        """While waiting: retry replan each tick; on success resume, on
-        timeout fall back to Bug1.
+        """While waiting: prefer the cheapest recovery in this order:
+          1) bubble cleared → resume ORIGINAL path (no replan)
+          2) try a throttled replan around the obstacle
+          3) on timeout, if bubble is clear, resume original path
+             (the breach was likely transient)
+          4) on timeout with bubble still breached, give up (or Bug1).
         """
         self._publish_stop()
         now = self.get_clock().now().nanoseconds * 1e-9
         elapsed = now - self._wait_start_time
         timeout = self.get_parameter('wait_for_clear_timeout').value
-
-        # Only retry replan if the immediate front is reasonably clear, so
-        # we don't spam A* while a person is still inches from the LiDAR.
         bubble_clear = not self._safety_bubble_violated()
-        if bubble_clear and self._replan_from_current(px, py):
-            self.get_logger().info('Path cleared — resuming FOLLOWING.')
+
+        # 1) Fastest recovery: bubble cleared and we still have a path.
+        #    Resume FOLLOWING the original path — no replan needed.
+        if bubble_clear and self._path:
+            self.get_logger().info(
+                'Bubble cleared — resuming original path.'
+            )
+            self._bubble_breach_ticks = 0
+            self._state = _State.FOLLOWING
+            self._publish_status(f'FOLLOWING: {self._current_goal_name}')
             return
 
+        # 2) Throttled replan around the obstacle (uses live costmap).
+        replan_period = 1.0
+        if now - self._wait_last_replan_try >= replan_period:
+            self._wait_last_replan_try = now
+            if self._replan_from_current(px, py):
+                self.get_logger().info(
+                    'Replan around obstacle succeeded — resuming FOLLOWING.'
+                )
+                return
+
+        # 3 / 4) Timeout handling.
         if elapsed >= timeout:
+            # If the bubble cleared but no path exists, we can't continue.
+            if bubble_clear and self._path:
+                self.get_logger().info(
+                    f'Wait-for-clear timeout but bubble now clear — '
+                    'resuming original path.'
+                )
+                self._bubble_breach_ticks = 0
+                self._state = _State.FOLLOWING
+                self._publish_status(f'FOLLOWING: {self._current_goal_name}')
+                return
             if bool(self.get_parameter('enable_bug1').value):
                 self.get_logger().warn(
                     f'Wait-for-clear timeout ({timeout:.1f} s) — entering Bug1 wall follow.'
@@ -807,15 +880,16 @@ class NavNode(Node):
         inflation level failed.  Emits a single WARN with diagnostics
         when the planner gives up entirely.
         """
-        infl0 = float(self.get_parameter('inflation_radius').value)
-        # Coarse-to-fine ladder.  Floor at 0.5× grid res so we don't
-        # ask for sub-cell inflation (would be a no-op anyway).
-        min_step = 0.5 * self._resolution
-        ladder = [infl0, infl0 * 0.75, infl0 * 0.5, infl0 * 0.25, 0.0]
-        ladder = sorted({round(max(v, 0.0), 4) for v in ladder
+        infl0    = float(self.get_parameter('inflation_radius').value)
+        infl_min = float(self.get_parameter('inflation_radius_min').value)
+        # Coarse-to-fine ladder.  Clamp ALL rungs to `inflation_radius_min`
+        # so we never produce a path the robot can't physically clear.
+        # Previously the ladder ended at 0.0 which let A* return paths
+        # threading between obstacles closer than the robot's own body,
+        # and the robot crashed when following one of those.
+        raw = [infl0, infl0 * 0.75, infl0 * 0.5, infl0 * 0.25, infl_min]
+        ladder = sorted({round(max(v, infl_min), 4) for v in raw
                           if v <= infl0 + 1e-6}, reverse=True)
-        if ladder and ladder[-1] > 0.0:
-            ladder.append(0.0)
 
         for infl in ladder:
             path = astar_plan(
@@ -957,16 +1031,24 @@ class NavNode(Node):
         return max(min_b, min(max_b, float(self._path_plan_infl)))
 
     def _safety_bubble_violated(self) -> bool:
-        """True if any scan ray in 360° is closer than the effective bubble."""
+        """True if at least `bubble_min_ray_count` rays in 360° fall inside
+        the effective bubble.  Requiring multiple rays filters out lone
+        spurious returns (glass reflections, dust, glancing hits) that
+        would otherwise stop the robot in clearly open space.
+        """
         scan = self._latest_scan
         if scan is None:
             return False
         radius = self._effective_safety_bubble()
+        min_count = int(self.get_parameter('bubble_min_ray_count').value)
+        count = 0
         for r in scan.ranges:
             if not math.isfinite(r):
                 continue
             if scan.range_min < r < radius:
-                return True
+                count += 1
+                if count >= min_count:
+                    return True
         return False
 
     # ------------------------------------------------------------------

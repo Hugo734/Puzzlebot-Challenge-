@@ -48,8 +48,9 @@ def generate_launch_description():
     # ── Args ──────────────────────────────────────────────────────────
     start_mode_arg = DeclareLaunchArgument(
         'start_mode',
-        default_value='mapping',
-        description='Initial system mode (mapping | navigation).',
+        default_value='navigation',
+        description='Initial system mode (mapping | navigation). Defaults to '
+                    'navigation; pass start_mode:=mapping when building a fresh map.',
     )
     map_yaml_arg = DeclareLaunchArgument(
         'map_yaml', default_value=map_yaml_default,

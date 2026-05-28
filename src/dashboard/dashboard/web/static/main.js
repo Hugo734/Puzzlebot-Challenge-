@@ -265,6 +265,24 @@ async function loadWaypoints() {
 // Navigation control
 // ---------------------------------------------------------------------------
 
+async function deleteWaypoint(name) {
+  if (!confirm(`Delete waypoint "${name}"?`)) return;
+  try {
+    const res = await fetch(`/api/waypoints/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+    if (res.ok) {
+      showToast(`Waypoint "${name}" deleted`, 'success');
+      await loadWaypoints();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showToast(`Delete failed: ${data.error || res.status}`, 'error');
+    }
+  } catch (err) {
+    showToast(`Network error: ${err.message}`, 'error');
+  }
+}
+
 async function sendGoalWaypoint(name) {
   try {
     const res  = await fetch('/api/goal', {
@@ -617,8 +635,19 @@ function initMapInteraction() {
     drawMapOverlay();
 
     if (_editMode) {
-      // Require a real drag to define heading; short click = cancel
-      if (dragDistPx < DRAG_THRESHOLD_PX) return;
+      // Short click in edit mode → delete the waypoint under the cursor
+      // (if any).  Long drag → create a new waypoint with heading.
+      if (dragDistPx < DRAG_THRESHOLD_PX) {
+        for (const [name, wp] of Object.entries(_waypoints)) {
+          const [wpx, wpy] = worldToCanvas(wp.x, wp.y);
+          const dist = Math.hypot(cx - wpx, cy - wpy);
+          if (dist < 14) {
+            deleteWaypoint(name);
+            return;
+          }
+        }
+        return;   // click on empty space in edit mode: do nothing
+      }
       // Map Y-axis: world Y up, canvas Y down → atan2 in world coords directly
       const theta = Math.atan2(drag.wy1 - drag.wy0, drag.wx1 - drag.wx0);
       _pendingWp = {x: drag.wx0, y: drag.wy0, theta};
