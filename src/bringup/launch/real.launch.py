@@ -70,17 +70,36 @@ def generate_launch_description():
         ),
     )
 
-    # ── 2. EKF localization (mode=real) — RSP, velocity_bridge, EKF ───
+    # ── 2. RSP + velocity_bridge (NO ekf, NO icp) ─────────────────────
+    # On the real robot the sole owner of odom→base_footprint TF is
+    # `real_odom` (started by the controller launch above).  We used to
+    # also start `ekf_localization` here, which published the SAME TF
+    # at a different rate from a different integrator — the resulting
+    # duplicate-broadcaster race made the map drift / "rotate" over
+    # time even when the matcher was working.  Disabled by passing
+    # use_ekf:=false; we still need velocity_bridge (→ /wl, /wr) and
+    # robot_state_publisher (→ base_link → laser TF) from this launch.
     ekf_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_localization, 'launch', 'ekf_localization.launch.py')
         ),
-        launch_arguments={'mode': 'real', 'open_rviz': 'false', 'use_icp': 'false'}.items(),
+        launch_arguments={
+            'mode':      'real',
+            'open_rviz': 'false',
+            'use_icp':   'false',
+            'use_ekf':   'false',
+        }.items(),
     )
 
     # ── 3. SLAM ───────────────────────────────────────────────────────
-    # Delay 5 s so EKF + RSP are publishing TF before SLAM starts consuming /scan.
-    slam_node = TimerAction(period=5.0, actions=[Node(
+    # Short delay so real_odom + RSP are publishing TF before SLAM consumes
+    # /scan; kept short on purpose because RViz uses `map` as fixed frame
+    # and the `map→odom` TF is published by this node — a long delay forces
+    # RViz into a "queue full / dropping LaserScan" backlog at startup.
+    # /odom is remapped because the sole odometry source on real hw is now
+    # real_odom (the duplicate-TF EKF was disabled), which publishes on
+    # /puzzlebot_controller/odom.
+    slam_node = TimerAction(period=1.5, actions=[Node(
         package='slam',
         executable='slam_node',
         name='slam_node',
@@ -89,12 +108,13 @@ def generate_launch_description():
             'map_yaml':     map_yaml,
             'start_mode':   start_mode,
         }],
+        remappings=[('/odom', '/puzzlebot_controller/odom')],
         output='screen',
         emulate_tty=True,
     )])
 
     # ── 4. Map saver ──────────────────────────────────────────────────
-    map_saver_node = TimerAction(period=6.0, actions=[Node(
+    map_saver_node = TimerAction(period=2.0, actions=[Node(
         package='slam',
         executable='map_saver',
         name='map_saver',
@@ -106,7 +126,7 @@ def generate_launch_description():
     )])
 
     # ── 5. Navigation ─────────────────────────────────────────────────
-    nav_node = TimerAction(period=6.0, actions=[Node(
+    nav_node = TimerAction(period=2.0, actions=[Node(
         package='navigation',
         executable='nav_node',
         name='nav_node',
@@ -121,7 +141,7 @@ def generate_launch_description():
     )])
 
     # ── 6. Mission control ────────────────────────────────────────────
-    mission_node = TimerAction(period=6.0, actions=[Node(
+    mission_node = TimerAction(period=2.0, actions=[Node(
         package='mission_control',
         executable='state_machine_node',
         name='state_machine_node',
@@ -130,7 +150,7 @@ def generate_launch_description():
     )])
 
     # ── 7. Dashboard ──────────────────────────────────────────────────
-    dashboard_node = TimerAction(period=6.0, actions=[Node(
+    dashboard_node = TimerAction(period=2.0, actions=[Node(
         package='dashboard',
         executable='dashboard_node',
         name='dashboard_node',
@@ -140,15 +160,6 @@ def generate_launch_description():
         }],
         output='screen',
     )])
-
-    # ── 8. Lifter (real Jetson.GPIO, 3-bit FPGA encoding) ─────────────
-    lifting_node = Node(
-        package='lifting',
-        executable='lifting_node',
-        name='lifting_node',
-        parameters=[{'use_sim_time': False, 'use_mock_gpio': False}],
-        output='screen',
-    )
 
     # ── 9. Voice control ──────────────────────────────────────────────
     voice_node = Node(
@@ -181,7 +192,7 @@ def generate_launch_description():
         nav_node,
         mission_node,
         # dashboard_node,
-        lifting_node,
+        # lifting_node,  # disabled until the FPGA-driven lifter is wired up
         voice_node,
         rviz_node,
     ])

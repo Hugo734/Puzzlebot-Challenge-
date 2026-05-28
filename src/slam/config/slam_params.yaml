@@ -5,42 +5,66 @@ slam_node:
     map_width:    400           # cells  (20 m)
     map_height:   400           # cells  (20 m)
 
-    # Log-odds increments + clamps.  Bias toward "occupied wins"
-    # (l_occ / |l_free| ≈ 2.5×) so distant walls don't get voted out
-    # by grazing free-rays.  Asymmetric clamps mean occupied
-    # remembers longer than free, so once a wall is established it
-    # survives being briefly out of view.
+    # Log-odds increments + clamps.
+    #
+    # Tuning principle (revised for crisp walls):
+    #   * l_occ / |l_free| ≈ 2.5×  → wall pixels accumulate faster than
+    #     they erode, so distant walls survive occasional grazing rays.
+    #   * l_max is LOW (2.5) on purpose: ghost cells produced by a brief
+    #     mis-aligned scan saturate fast at 2.5, then a handful of
+    #     subsequent free-rays through them are enough to push them
+    #     below display_l_free → they disappear from the published map.
+    #     With the previous l_max=3.5 ghosts took ~4× longer to clear.
+    #   * l_min is symmetric-ish so free regions also recover quickly if
+    #     a transient obstacle (person walking through) is removed.
     l_occ:        0.50
     l_free:      -0.20
-    l_min:       -2.0
-    l_max:        3.5
+    l_min:       -1.5
+    l_max:        2.5
 
-    # Display thresholds for to_ros_data() — higher evidence required
-    # to classify a cell as occupied/free in the published map.
-    display_l_occ:   1.5
-    display_l_free: -0.8
+    # Display thresholds for to_ros_data() — separate from the update
+    # increments so we can require MORE evidence to commit a cell to a
+    # displayed classification than the update process uses internally.
+    # Raised so only multi-hit walls (≥ 4 hits) appear as occupied —
+    # single-scan smears never reach this and stay "unknown" (grey).
+    display_l_occ:   2.0
+    display_l_free: -1.0
 
     # ── Scan filtering ───────────────────────────────────────────
     range_min:   0.12
     range_max:   10.0
 
-    # Process every Nth ray (1 = all, higher = faster).  10 Hz LiDAR
-    # gives us little time per scan; ray_step ≥ 2 leaves more budget
-    # for ICP + KDTree + normals.
-    ray_step: 2
+    # Process every Nth ray (1 = all, higher = faster).  Using all rays
+    # gives the densest, crispest wall traces in the grid — the per-scan
+    # budget is comfortable with the cached matcher target (KDTree +
+    # normals built once per map change, not per scan), so ray_step=1
+    # is the default.  Bump to 2 only if the Jetson Nano can't keep up
+    # at 10 Hz.
+    ray_step: 1
 
     # ── Map publish cadence ──────────────────────────────────────
     map_publish_every: 5
 
     # ── Map-update gating ────────────────────────────────────────
-    # Minimum motion before integrating a scan — suppresses
-    # stationary jitter.
-    min_delta_xy:    0.05   # m
-    min_delta_theta: 0.05   # rad (~3°)
+    # Minimum motion before integrating a scan.  Looser than the
+    # angular gate below — we WANT lots of scans integrated during
+    # slow translation so the walls accumulate evidence quickly.
+    min_delta_xy:    0.02   # m
+    min_delta_theta: 0.02   # rad (~1.1°)
     # Force an integration when the scan itself changes by this
     # much (RMS range delta) even if odom says we haven't moved —
     # catches silent odom drift / wheel slip.
-    min_scan_diff:   0.07   # m
+    min_scan_diff:   0.05   # m
+
+    # Skip log-odds integration when |ω| exceeds this threshold.
+    # The per-ray deskew assumes ω is constant within the scan
+    # period (~100 ms); above ~0.6 rad/s that assumption breaks
+    # down and integrating a sheared scan produces double-walls /
+    # smearing in the published map.  The scan matcher still runs
+    # on every scan, so the pose stays accurate — we just don't
+    # WRITE to the grid until the robot finishes turning.  Set to
+    # 0 to disable.
+    map_update_omega_max: 0.6   # rad/s (~34°/s)
 
     # ── ICP scan matcher ─────────────────────────────────────────
     use_icp:                true
@@ -72,17 +96,22 @@ slam_node:
     icp_scan_accum_n:       4
 
     # Adaptive quality gate: median of recent successful fitness
-    # values × factor, clamped to icp_max_fitness on top and 0.05 m
-    # on the bottom.  Tighter than a fixed threshold when the
-    # robot is matching well, looser when LiDAR noise spikes.
-    icp_fitness_gate_factor: 3.0
-    icp_fitness_history_n:   20
+    # values × factor, clamped to icp_max_fitness on top and 0.20 m
+    # on the bottom (3× resolution).  Loosened from 3.0× → 5.0× now
+    # that the matcher runs on every scan: in-motion fitness is
+    # naturally higher than stationary fitness, and the tighter gate
+    # was rejecting otherwise-good moving matches.
+    icp_fitness_gate_factor: 5.0
+    icp_fitness_history_n:   30
 
-    # Pose-jump rejection — at 10 Hz scans, anything bigger than
-    # this between successive scans is almost certainly a wrong
-    # association.
-    icp_jump_xy_max:        0.30   # m   (= 3 m/s for one scan period)
-    icp_jump_theta_max:     0.40   # rad (~23° per scan)
+    # Pose-jump rejection.  These limits used to be tight because the
+    # matcher only ran during keyframes (stationary moments) and a big
+    # delta between two stationary samples really was a bad match.  With
+    # keyframe_mode off, the matcher runs on EVERY scan AND the FIRST
+    # match after odometry drift accumulates may legitimately need to
+    # snap back a sizeable correction — so we widen the limits.
+    icp_jump_xy_max:        0.60   # m   (= 6 m/s for one scan period)
+    icp_jump_theta_max:     0.70   # rad (~40° per scan)
 
     # FFT polar correlation pre-alignment — gives ICP a good
     # rotation init when the robot is turning fast (10 Hz can lose
@@ -128,37 +157,50 @@ slam_node:
     csm_min_occupied_cells: 30
 
     # ── Rotation correction clamp (rotation drift safety net) ────
-    # Hard limit on |Δθ_matcher − Δθ_odom| per scan, in degrees.  The
-    # clamp tightens with the robot's odom-reported angular velocity:
-    #   |ω| < slow_omega         → stationary    bucket (most lenient)
-    #   slow_omega ≤ |ω| < fast  → slow turn     bucket
-    #   |ω| ≥ fast_omega         → fast turn     bucket (most strict)
-    # Rationale: wheel encoders integrate fast turns with low absolute
-    # error; the matcher's rotation estimate, by contrast, gets worse
-    # at high ω (sparser rays per angular bucket, more deskew sensitivity).
-    rot_clamp_stationary_deg: 6.0
-    rot_clamp_slow_deg:       3.0
-    rot_clamp_fast_deg:       1.0
-    rot_clamp_slow_omega:     0.20   # rad/s (~11°/s)
-    rot_clamp_fast_omega:     0.60   # rad/s (~34°/s)
+    # Hard limit on |Δθ_matcher − Δθ_odom| per scan, in degrees.
+    # Loosened to match continuous-matching mode: when the matcher
+    # runs every scan, the corrections per scan stay small in
+    # practice, but the FIRST scan that catches up after a brief
+    # ICP miss must be allowed to apply a real fix.
+    rot_clamp_stationary_deg: 12.0
+    rot_clamp_slow_deg:        6.0
+    rot_clamp_fast_deg:        3.0
+    rot_clamp_slow_omega:      0.20   # rad/s (~11°/s)
+    rot_clamp_fast_omega:      0.60   # rad/s (~34°/s)
+
+    # ── Keyframe mode ────────────────────────────────────────────
+    # When TRUE, the scan matcher AND the map update only run while
+    # the robot is physically stationary.  Intended as a defence
+    # against wheel-slip on slippery floors, but in practice it means
+    # the matcher is OFF whenever you're driving — so wheel-odom
+    # drift accumulates without correction, and the very first match
+    # after stopping has to fix a large error that the pose-jump /
+    # rotation-clamp / fitness gates then reject.  The result is the
+    # exact "starts well, then stops correcting" symptom we hit on
+    # the real robot.
+    #
+    # Set FALSE → matcher runs on every scan (continuous matching).
+    # Within-scan shear is already handled by the per-ray deskew in
+    # scan_to_points(), so we don't need keyframes to avoid it.
+    keyframe_mode: false
 
     # ── Range outlier filter ─────────────────────────────────────
     # RPLidar A1 occasionally emits isolated range spikes (glass,
     # dark cloth, dust).  Rays whose value differs from BOTH polar
     # neighbours by > outlier_max_jump are dropped — true wall
     # edges have only ONE differing neighbour so they survive.
+    # Tightened from 0.5 → 0.3 because in this room genuine wall
+    # corners produce neighbour-deltas of ≤ 0.25 m at typical ranges,
+    # so 0.3 still keeps them while cutting more spurious spikes.
     outlier_filter_enabled: true
-    outlier_max_jump:       0.5
+    outlier_max_jump:       0.3
 
     # ── TF smoothing ─────────────────────────────────────────────
-    # EMA on the published map→odom transform.  Setting this < 1.0
-    # damps per-scan jitter but introduces a lag during fast
-    # rotations: because odom→base_footprint updates immediately
-    # while map→odom lags, RViz sees the lidar scan rotating
-    # relative to the map.  1.0 = no smoothing.
-    # 0.3 gives stable RViz visualization without hurting map quality
-    # (the map integrates at the raw SLAM pose, not the smoothed TF).
-    tf_smoothing_alpha: 0.3
+    # EMA on the published map→odom transform.  1.0 = no smoothing.
+    # With continuous matching (every scan) the per-scan correction
+    # is already small and EMA mostly adds lag — set to 1.0 by
+    # default.  Drop to 0.6–0.8 only if RViz visualisation jitters.
+    tf_smoothing_alpha: 1.0
 
     # ── Initial map orientation ──────────────────────────────────
     # Rotate the map frame at startup so the room appears axis-

@@ -31,6 +31,7 @@ def launch_setup(context, *args, **kwargs):
     mode      = LaunchConfiguration('mode').perform(context)
     open_rviz = LaunchConfiguration('open_rviz').perform(context) == 'true'
     use_icp   = LaunchConfiguration('use_icp').perform(context) == 'true'
+    use_ekf   = LaunchConfiguration('use_ekf').perform(context) == 'true'
 
     pkg  = get_package_share_directory('localization')
     pkg_desc = get_package_share_directory('description')
@@ -102,11 +103,12 @@ def launch_setup(context, *args, **kwargs):
         )
         nodes = [
             kinematic_simulator,
-            ekf_node,
             robot_state_publisher,
             joint_state_publisher,
             teleop,
         ]
+        if use_ekf:
+            nodes.append(ekf_node)
         if use_icp:
             nodes.append(icp_node)
         if open_rviz:
@@ -122,10 +124,11 @@ def launch_setup(context, *args, **kwargs):
     )
     nodes = [
         velocity_bridge,
-        ekf_node,
         robot_state_publisher,
         joint_state_publisher,
     ]
+    if use_ekf:
+        nodes.append(ekf_node)
     if use_icp:
         nodes.append(icp_node)
     if open_rviz:
@@ -150,6 +153,13 @@ def generate_launch_description():
             default_value='true',
             description='Launch icp_node for scan-to-scan correction. '
                         'Set false when slam_node is running (it handles ICP internally).',
+        ),
+        DeclareLaunchArgument(
+            'use_ekf',
+            default_value='true',
+            description='Launch ekf_localization. Set false when another node '
+                        '(e.g. real_odom) is already the sole odom→base_footprint '
+                        'TF publisher, to avoid duplicate-broadcaster TF races.',
         ),
         OpaqueFunction(function=launch_setup),
     ])

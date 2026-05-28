@@ -217,6 +217,13 @@ class SLAMNode(Node):
         self.declare_parameter('min_delta_xy',       0.02)
         self.declare_parameter('min_delta_theta',    0.01)
         self.declare_parameter('min_scan_diff',      0.05)  # m RMS; force update on big scene change
+        # Skip log-odds integration when the robot is turning fast — the
+        # per-ray deskew assumes ω is constant within the scan period,
+        # which breaks down at high |ω| and bakes a sheared cloud into
+        # the map.  Set to 0 to disable.  The scan matcher still runs
+        # on every scan so the pose stays accurate; only the GRID write
+        # is gated, which is what we want for crisp walls.
+        self.declare_parameter('map_update_omega_max', 0.6)  # rad/s
         # Map frame initial heading / laser yaw trim
         self.declare_parameter('laser_yaw_trim',     0.0)
         self.declare_parameter('map_initial_heading', 0.0)
@@ -286,8 +293,15 @@ class SLAMNode(Node):
         self._ox = 0.0
         self._oy = 0.0
         self._otheta = 0.0
+        self._omega = 0.0     # latest ω from /odom.twist.twist.angular.z
+        self._lin_v = 0.0     # latest v   from /odom.twist.twist.linear.x
         self._odom_ready = False
 
+        # Odom buffer entries: (t, x, y, theta, omega).  We buffer the
+        # instantaneous ω so the per-scan deskew can interpolate it at
+        # the scan midpoint instead of finite-differencing two poses
+        # (which double-amplifies any odom jitter and lags behind the
+        # true ω at the moment the scan was taken).
         self._odom_buf = deque(maxlen=200)   # ~10 s of odom samples @ 20 Hz
 
         # map→odom: computed from initial pose + odom=(0,0,0) at startup
@@ -306,7 +320,6 @@ class SLAMNode(Node):
         hist_n = max(5, int(self.get_parameter('icp_fitness_history_n').value))
         self._fitness_history = deque(maxlen=hist_n)
         self._consecutive_bad = 0
-        self._pf_active = False
         self._rng = np.random.default_rng()
 
         # Monotonic scan counter (NOT len(scan_buf), which saturates at maxlen
@@ -316,6 +329,21 @@ class SLAMNode(Node):
         # Keyframe-mode state: streak of consecutive "still" scans
         self._still_streak = 0
         self._was_keyframe = False  # for logging transitions
+
+        # ── Matcher-target cache ─────────────────────────────────
+        # In navigation mode the map never changes — recomputing the
+        # local map-cloud + KDTree + normals on every scan is pure
+        # waste.  We cache them and invalidate only when (a) the map
+        # was written to (mapping mode) or (b) the robot has moved
+        # past half the local-disc radius from the cache centre, at
+        # which point the cached cloud no longer covers the scan.
+        self._cache_pts     = None
+        self._cache_tree    = None
+        self._cache_normals = None
+        self._cache_mode    = None        # 'map' | 'scan' | None
+        self._cache_rx      = 0.0
+        self._cache_ry      = 0.0
+        self._map_dirty     = True        # forces first build
 
         # Pose at which the grid was last updated — used for the
         # minimum-movement gate (stationary jitter suppression).
@@ -422,6 +450,7 @@ class SLAMNode(Node):
 
             if pw == self.grid.width and ph == self.grid.height:
                 self.grid._log[:] = np.clip(lo, self.grid.l_min, self.grid.l_max)
+                self._map_dirty = True
                 self.get_logger().info(
                     f'Pre-loaded saved map ({pw}×{ph}) into SLAM grid — '
                     f'localization mode active')
@@ -485,6 +514,7 @@ class SLAMNode(Node):
             self._last_map_x = 0.0
             self._last_map_y = 0.0
             self._last_map_theta = 0.0
+            self._map_dirty = True
             self.get_logger().info('Occupancy grid reset to empty (unknown).')
             response.success = True
             response.message = 'grid cleared'
@@ -535,10 +565,13 @@ class SLAMNode(Node):
         self._ox     = msg.pose.pose.position.x
         self._oy     = msg.pose.pose.position.y
         self._otheta = _yaw_from_quaternion(msg.pose.pose.orientation)
+        self._omega  = float(msg.twist.twist.angular.z)
+        self._lin_v  = float(msg.twist.twist.linear.x)
         self._odom_ready = True
 
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        self._odom_buf.append((t, self._ox, self._oy, self._otheta))
+        self._odom_buf.append(
+            (t, self._ox, self._oy, self._otheta, self._omega))
 
         # Republish slam_pose at odom rate (20 Hz) so the RViz arrow
         # tracks the robot model between scan callbacks.
@@ -552,25 +585,50 @@ class SLAMNode(Node):
             return self._ox, self._oy, self._otheta
 
         if t_query <= self._odom_buf[0][0]:
-            _, x, y, th = self._odom_buf[0]
+            _, x, y, th, _ = self._odom_buf[0]
             return x, y, th
         if t_query >= self._odom_buf[-1][0]:
-            _, x, y, th = self._odom_buf[-1]
+            _, x, y, th, _ = self._odom_buf[-1]
             return x, y, th
 
         prev = self._odom_buf[0]
         for sample in self._odom_buf:
             if sample[0] >= t_query:
-                t0, x0, y0, th0 = prev
-                t1, x1, y1, th1 = sample
+                t0, x0, y0, th0, _ = prev
+                t1, x1, y1, th1, _ = sample
                 a = (t_query - t0) / (t1 - t0) if t1 > t0 else 0.0
                 dth = _wrap(th1 - th0)
                 return (x0 + a * (x1 - x0),
                         y0 + a * (y1 - y0),
                         _wrap(th0 + a * dth))
             prev = sample
-        _, x, y, th = self._odom_buf[-1]
+        _, x, y, th, _ = self._odom_buf[-1]
         return x, y, th
+
+    def _omega_at(self, t_query):
+        """
+        Linearly interpolate the instantaneous angular velocity ω at ROS
+        time `t_query` (float seconds).  Reading ω from the odom twist
+        directly and interpolating to the scan midpoint produces a much
+        better deskew rate than finite-differencing two poses, which
+        was sensitive to odom quantisation noise and lagged the actual
+        ω at fast turns.
+        """
+        if not self._odom_buf:
+            return self._omega
+        if t_query <= self._odom_buf[0][0]:
+            return self._odom_buf[0][4]
+        if t_query >= self._odom_buf[-1][0]:
+            return self._odom_buf[-1][4]
+        prev = self._odom_buf[0]
+        for sample in self._odom_buf:
+            if sample[0] >= t_query:
+                t0, _, _, _, om0 = prev
+                t1, _, _, _, om1 = sample
+                a = (t_query - t0) / (t1 - t0) if t1 > t0 else 0.0
+                return om0 + a * (om1 - om0)
+            prev = sample
+        return self._odom_buf[-1][4]
 
     # ──────────────────────────────────────────────────────────────
     # Laser → base TF resolution
@@ -636,15 +694,17 @@ class SLAMNode(Node):
             ranges_sub = ranges_raw
             angle_inc  = msg.angle_increment
 
-        # ── Compute scan_omega FIRST so the cloud can be deskewed ─
-        # The map update has always applied per-ray deskew internally
-        # (via update_scan); now the cloud passed to scan matching is
-        # deskewed the same way, so the matcher no longer interprets
-        # the within-scan shear as bogus pose rotation.
+        # ── Compute scan_omega from the odom twist (instantaneous ω) ──
+        # Older versions finite-differenced two pose samples across the
+        # scan period to estimate ω, which (a) lagged the actual ω at
+        # the moment the scan was taken, and (b) amplified the odom
+        # angle quantisation noise.  Reading ω from /odom.twist.angular.z
+        # and interpolating to the scan MIDPOINT (≈ the average angle
+        # the rays were captured at) produces a much cleaner deskew —
+        # this is the primary defence against the "wall doubling" smear
+        # the user sees during rotation.
         scan_dur = msg.scan_time if msg.scan_time > 0.0 else 0.1
-        _, _, theta_end = self._odom_at(scan_t + scan_dur)
-        scan_omega = (_wrap(theta_end - scan_otheta) / scan_dur
-                      if scan_dur > 0 else 0.0)
+        scan_omega = self._omega_at(scan_t + 0.5 * scan_dur)
 
         # ── Build the deskewed point cloud (base frame) ──────────
         cloud = scan_to_points(
@@ -814,15 +874,41 @@ class SLAMNode(Node):
 
     def _build_target(self):
         """
-        Choose matcher target:
-          1. occupied-cell point cloud around the robot (scan-to-map)
-          2. concatenation of last N scans in world frame (fallback)
-        Returns (target_points, mode_string) or (None, None) if no target.
-        """
-        min_pts = self.get_parameter('icp_min_points').value
+        Choose matcher target and return it ready-to-use:
 
-        map_radius = self.get_parameter('icp_map_radius').value
-        threshold  = self.get_parameter('icp_map_occ_threshold').value
+            (points, mode, tree, normals)
+
+        where `tree` is a cKDTree on `points` and `normals` are per-point
+        2D PCA normals (None when scipy isn't available).
+
+        We cache the cloud, the KDTree, and the normals — those three
+        are the bulk of the per-scan CPU.  The cache is reused when:
+
+          * the map hasn't been written to since the cache build, AND
+          * the robot is still within  0.5 × icp_map_radius  of the
+            cache centre (else the cached cloud no longer covers the
+            scan and we'd be matching against stale geometry).
+
+        In navigation mode (map frozen) both conditions hold for long
+        stretches of motion → cache is essentially permanent inside its
+        radius and the matcher cost drops from "rebuild every scan" to
+        a single KDTree lookup per scan.
+        """
+        min_pts    = self.get_parameter('icp_min_points').value
+        map_radius = float(self.get_parameter('icp_map_radius').value)
+
+        # ── Cache hit ────────────────────────────────────────────
+        # Distance from the cache centre to current SLAM pose.
+        if (self._cache_pts is not None
+                and self._cache_mode == 'map'
+                and not self._map_dirty
+                and math.hypot(self._sx - self._cache_rx,
+                               self._sy - self._cache_ry) < 0.5 * map_radius):
+            return (self._cache_pts, self._cache_mode,
+                    self._cache_tree, self._cache_normals)
+
+        # ── Cache miss → rebuild map cloud around robot ──────────
+        threshold = self.get_parameter('icp_map_occ_threshold').value
         if threshold < 0.0:
             threshold = self.grid.display_l_occ
         map_pts = self.grid.get_occupied_points(
@@ -839,14 +925,40 @@ class SLAMNode(Node):
             map_pts = map_pts[sel]
 
         if len(map_pts) >= min_pts:
-            return map_pts, 'map'
+            from slam.icp import estimate_normals
+            tree = cKDTree(map_pts) if _HAS_KDTREE else None
+            normals = (estimate_normals(
+                            map_pts,
+                            k=int(self.get_parameter('icp_normal_neighbors').value),
+                            tree=tree)
+                       if self.get_parameter('icp_use_point_to_line').value
+                       else None)
+            self._cache_pts     = map_pts
+            self._cache_tree    = tree
+            self._cache_normals = normals
+            self._cache_mode    = 'map'
+            self._cache_rx      = float(self._sx)
+            self._cache_ry      = float(self._sy)
+            self._map_dirty     = False
+            return map_pts, 'map', tree, normals
 
+        # ── Fallback to scan-to-scan when the map is too sparse ──
+        # Scan stack changes every frame, so we DON'T cache here —
+        # the buffer is tiny (≤ icp_scan_accum_n scans) anyway.
         if len(self._scan_buf) > 0:
             stacked = np.vstack([s['world'] for s in self._scan_buf])
             if len(stacked) >= min_pts:
-                return stacked, 'scan'
+                tree = cKDTree(stacked) if _HAS_KDTREE else None
+                # No normals: scan fallback uses point-to-point ICP.
+                # Invalidate any stale map-cloud cache.
+                self._cache_pts = None
+                self._cache_mode = 'scan'
+                return stacked, 'scan', tree, None
 
-        return None, None
+        # Nothing to match against
+        self._cache_pts = None
+        self._cache_mode = None
+        return None, None, None, None
 
     def _run_scan_matcher(self, cloud, ranges_sub):
         """
@@ -860,7 +972,7 @@ class SLAMNode(Node):
         Returns True iff the matcher produced a pose we trust enough to
         commit to /slam_pose AND integrate the scan into the map.
         """
-        target, mode = self._build_target()
+        target, mode, target_tree, target_normals = self._build_target()
         if target is None:
             return None    # didn't run — caller treats as "warmup"
 
@@ -923,6 +1035,8 @@ class SLAMNode(Node):
             min_points=self.get_parameter('icp_min_points').value,
             use_point_to_line=self.get_parameter('icp_use_point_to_line').value,
             normal_neighbors=self.get_parameter('icp_normal_neighbors').value,
+            target_tree=target_tree,
+            target_normals=target_normals,
         )
 
         accept, reason = self._evaluate_icp(converged, fitness, dx, dy, dtheta)
@@ -945,7 +1059,8 @@ class SLAMNode(Node):
 
         bad_threshold = self.get_parameter('recovery_bad_streak').value
         if self._consecutive_bad >= bad_threshold and mode == 'map':
-            applied = self._trigger_particle_recovery(cloud, target)
+            applied = self._trigger_particle_recovery(
+                cloud, target, target_tree=target_tree)
             if applied:
                 self.get_logger().warn(
                     'Particle-filter recovery applied — pose snapped to '
@@ -1029,7 +1144,7 @@ class SLAMNode(Node):
     # Particle filter recovery
     # ──────────────────────────────────────────────────────────────
 
-    def _trigger_particle_recovery(self, cloud_base, map_pts):
+    def _trigger_particle_recovery(self, cloud_base, map_pts, target_tree=None):
         """
         Sample N pose hypotheses around the current SLAM estimate, score
         each against the local map, snap to the best.  Returns True if a
@@ -1048,7 +1163,7 @@ class SLAMNode(Node):
         dys  = self._rng.normal(0.0, sxy, n); dys[0]  = 0.0
         dths = self._rng.normal(0.0, sth, n); dths[0] = 0.0
 
-        tree = cKDTree(map_pts)
+        tree = target_tree if target_tree is not None else cKDTree(map_pts)
 
         best_score = -np.inf
         best_idx   = 0
@@ -1099,6 +1214,21 @@ class SLAMNode(Node):
         if self._localization_mode:
             return
 
+        # ── Rotational-velocity gate ─────────────────────────────────
+        # See declare_parameter docstring: skipping integration at high
+        # |ω| is what prevents the "double walls" smear that appears
+        # whenever the robot turns through a previously-mapped region.
+        # The matcher above already ran and accepted the pose, so we
+        # are NOT losing localisation — we're just declining to write
+        # a sheared scan into a crisp map.
+        omega_max = self.get_parameter('map_update_omega_max').value
+        if omega_max > 0.0 and abs(scan_omega) > omega_max:
+            self.get_logger().info(
+                f'Map update skipped — |ω|={abs(scan_omega):.2f} > '
+                f'{omega_max:.2f} rad/s (rotation too fast for clean integration)',
+                throttle_duration_sec=2.0)
+            return
+
         sx, sy, sth = scan_slam
         min_xy    = self.get_parameter('min_delta_xy').value
         min_theta = self.get_parameter('min_delta_theta').value
@@ -1133,6 +1263,8 @@ class SLAMNode(Node):
         self._last_map_x     = sx
         self._last_map_y     = sy
         self._last_map_theta = sth
+        # Map mutated → cached target cloud / KDTree / normals are stale.
+        self._map_dirty      = True
 
     # ──────────────────────────────────────────────────────────────
     # Odometry propagation
@@ -1145,15 +1277,8 @@ class SLAMNode(Node):
             (self._ox, self._oy, self._otheta))
 
     def _odom_speed(self):
-        """Estimate |v| from the last two odom samples (m/s)."""
-        if len(self._odom_buf) < 2:
-            return 0.0
-        t1, x1, y1, _ = self._odom_buf[-1]
-        t0, x0, y0, _ = self._odom_buf[-2]
-        dt = t1 - t0
-        if dt <= 0.0:
-            return 0.0
-        return math.hypot(x1 - x0, y1 - y0) / dt
+        """Return |v| from the latest odom twist (m/s)."""
+        return abs(self._lin_v)
 
     # ──────────────────────────────────────────────────────────────
     # Publishers
