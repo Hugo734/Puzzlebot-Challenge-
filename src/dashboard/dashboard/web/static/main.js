@@ -43,7 +43,8 @@ let _waypoints = {};
 
 // Edit mode
 let _editMode    = false;
-let _pendingWp   = null;  // {x, y} world coords of pending placement
+let _pendingWp   = null;  // {x, y, theta} world coords of pending placement
+let _dragWp      = null;  // {wx0, wy0, wx1, wy1} live drag preview
 
 // ---------------------------------------------------------------------------
 // Teleop state
@@ -426,6 +427,50 @@ function drawMapOverlay() {
   // ---- Draw waypoints ----
   drawWaypoints(ctx);
 
+  // ---- Draw drag preview (RViz-style "click & drag pose") ----
+  if (_dragWp) {
+    const [c0x, c0y] = worldToCanvas(_dragWp.wx0, _dragWp.wy0);
+    const [c1x, c1y] = worldToCanvas(_dragWp.wx1, _dragWp.wy1);
+    const dragColor = '#cc88ff';
+
+    ctx.save();
+    ctx.shadowColor = dragColor;
+    ctx.shadowBlur  = 8;
+
+    // Origin marker
+    ctx.beginPath();
+    ctx.arc(c0x, c0y, 8, 0, Math.PI * 2);
+    ctx.fillStyle = dragColor + '40';
+    ctx.fill();
+    ctx.strokeStyle = dragColor;
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+
+    const distPx = Math.hypot(c1x - c0x, c1y - c0y);
+    if (distPx > 4) {
+      const ang = Math.atan2(c1y - c0y, c1x - c0x);
+      // Shaft
+      ctx.beginPath();
+      ctx.moveTo(c0x, c0y);
+      ctx.lineTo(c1x, c1y);
+      ctx.strokeStyle = dragColor;
+      ctx.lineWidth   = 3;
+      ctx.stroke();
+      // Arrowhead
+      const ahLen = 12;
+      ctx.beginPath();
+      ctx.moveTo(c1x, c1y);
+      ctx.lineTo(c1x - ahLen * Math.cos(ang - 0.45),
+                 c1y - ahLen * Math.sin(ang - 0.45));
+      ctx.lineTo(c1x - ahLen * Math.cos(ang + 0.45),
+                 c1y - ahLen * Math.sin(ang + 0.45));
+      ctx.closePath();
+      ctx.fillStyle = dragColor;
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   // ---- Draw robot arrow ----
   const [rx, ry] = worldToCanvas(_currentPose.x, _currentPose.y);
   ctx.save();
@@ -531,25 +576,60 @@ function initMapInteraction() {
   const canvas = document.getElementById('mapCanvas');
   if (!canvas) return;
 
-  canvas.addEventListener('click', (e) => {
+  const DRAG_THRESHOLD_PX = 10;
+  let downCx = 0, downCy = 0;
+
+  const evToCanvas = (e) => {
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width  / rect.width;
     const scaleY = canvas.height / rect.height;
-    const cx = (e.clientX - rect.left) * scaleX;
-    const cy = (e.clientY - rect.top)  * scaleY;
+    return [(e.clientX - rect.left) * scaleX,
+            (e.clientY - rect.top)  * scaleY];
+  };
+
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    // Don't start a drag while the popup is up
+    if (!document.getElementById('waypointPopup').classList.contains('hidden')) return;
+    const [cx, cy] = evToCanvas(e);
+    downCx = cx; downCy = cy;
+    const [wx, wy] = canvasToWorld(cx, cy);
+    _dragWp = {wx0: wx, wy0: wy, wx1: wx, wy1: wy};
+    drawMapOverlay();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!_dragWp) return;
+    const [cx, cy] = evToCanvas(e);
+    const [wx, wy] = canvasToWorld(cx, cy);
+    _dragWp.wx1 = wx;
+    _dragWp.wy1 = wy;
+    drawMapOverlay();
+  });
+
+  window.addEventListener('mouseup', (e) => {
+    if (!_dragWp || e.button !== 0) return;
+    const drag = _dragWp;
+    _dragWp = null;
+
+    const [cx, cy] = evToCanvas(e);
+    const dragDistPx = Math.hypot(cx - downCx, cy - downCy);
+    drawMapOverlay();
 
     if (_editMode) {
-      const [wx, wy] = canvasToWorld(cx, cy);
-      _pendingWp = {x: wx, y: wy};
-      showWaypointPopup(wx, wy);
-    } else {
-      // Click on existing waypoint → navigate
+      // Require a real drag to define heading; short click = cancel
+      if (dragDistPx < DRAG_THRESHOLD_PX) return;
+      // Map Y-axis: world Y up, canvas Y down → atan2 in world coords directly
+      const theta = Math.atan2(drag.wy1 - drag.wy0, drag.wx1 - drag.wx0);
+      _pendingWp = {x: drag.wx0, y: drag.wy0, theta};
+      showWaypointPopup(drag.wx0, drag.wy0, theta);
+    } else if (dragDistPx < DRAG_THRESHOLD_PX) {
+      // Short click outside edit mode → navigate to nearby waypoint
       for (const [name, wp] of Object.entries(_waypoints)) {
         const [wpx, wpy] = worldToCanvas(wp.x, wp.y);
         const dist = Math.hypot(cx - wpx, cy - wpy);
         if (dist < 14) {
           sendGoalWaypoint(name);
-          // Sync dropdown
           const sel = document.getElementById('waypointSelect');
           if (sel) sel.value = name;
           return;
@@ -576,9 +656,15 @@ function initEditMode() {
     if (canvas) canvas.classList.toggle('edit-mode', _editMode);
   });
 
-  // ESC cancels edit mode
+  // ESC cancels: in-flight drag, then edit mode + popup
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && _editMode) {
+    if (e.key !== 'Escape') return;
+    if (_dragWp) {
+      _dragWp = null;
+      drawMapOverlay();
+      return;
+    }
+    if (_editMode) {
       _editMode = false;
       btn.classList.remove('active');
       hint.classList.add('hidden');
@@ -592,16 +678,13 @@ function initEditMode() {
 // Waypoint popup
 // ---------------------------------------------------------------------------
 
-function showWaypointPopup(wx, wy) {
+function showWaypointPopup(wx, wy, theta) {
   setText('wpCoords', `x: ${wx.toFixed(3)} m,  y: ${wy.toFixed(3)} m`);
+  setText('wpHeading',
+    `θ: ${theta.toFixed(3)} rad (${(theta * 180 / Math.PI).toFixed(1)}°)`);
 
-  const nameIn  = document.getElementById('wpName');
-  const thetaIn = document.getElementById('wpTheta');
-  if (nameIn)  { nameIn.value = ''; }
-  if (thetaIn) {
-    thetaIn.value = '0';
-    updateThetaDisplay(0);
-  }
+  const nameIn = document.getElementById('wpName');
+  if (nameIn) nameIn.value = '';
 
   document.getElementById('waypointPopup').classList.remove('hidden');
   setTimeout(() => nameIn && nameIn.focus(), 50);
@@ -612,33 +695,17 @@ function hideWaypointPopup() {
   _pendingWp = null;
 }
 
-function updateThetaDisplay(val) {
-  setText('wpThetaVal', parseFloat(val).toFixed(2));
-  setText('wpThetaDeg', `${(parseFloat(val) * 180 / Math.PI).toFixed(1)}°`);
-}
-
 function initWaypointPopup() {
-  const thetaIn = document.getElementById('wpTheta');
-  thetaIn?.addEventListener('input', () => updateThetaDisplay(thetaIn.value));
-
-  document.getElementById('btnUseRobotTheta')?.addEventListener('click', () => {
-    if (thetaIn) {
-      thetaIn.value = _currentPose.theta.toFixed(4);
-      updateThetaDisplay(thetaIn.value);
-    }
-  });
-
   document.getElementById('btnCancelWaypoint')?.addEventListener('click', hideWaypointPopup);
 
   document.getElementById('btnSaveWaypoint')?.addEventListener('click', async () => {
-    const name  = (document.getElementById('wpName')?.value || '').trim();
-    const theta = parseFloat(document.getElementById('wpTheta')?.value || '0');
-
+    const name = (document.getElementById('wpName')?.value || '').trim();
     if (!name) {
       document.getElementById('wpName')?.focus();
       return;
     }
     if (!_pendingWp) return;
+    const theta = _pendingWp.theta || 0;
 
     try {
       const res = await fetch('/api/waypoints', {

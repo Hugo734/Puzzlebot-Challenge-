@@ -5,7 +5,8 @@ class OccupancyGrid:
 
     def __init__(self, width, height, resolution,
                  l_occ=0.85, l_free=-0.40, l_min=-5.0, l_max=5.0,
-                 display_l_occ=None, display_l_free=None):
+                 display_l_occ=None, display_l_free=None,
+                 occupied_stop=None):
         self.width      = width
         self.height     = height
         self.resolution = resolution
@@ -20,6 +21,18 @@ class OccupancyGrid:
         # tuned independently without changing the update dynamics.
         self.display_l_occ  = display_l_occ  if display_l_occ  is not None else l_occ
         self.display_l_free = display_l_free if display_l_free is not None else l_free
+
+        # Occupied-stop threshold: when a free-ray DDA would traverse a
+        # cell whose log-odds already exceed this, the trace TERMINATES
+        # at that cell (and the cell itself is not free-voted).  This is
+        # the canonical fix for "walls keep moving / matcher loses lock":
+        # a slight pose error makes a ray's geometry pass 1-2 pixels to
+        # one side of a previously-mapped wall, so the ray's free votes
+        # erase the wall's cells from the inside.  An occupied-stop
+        # prevents that — once geometry says "we hit a wall", we trust
+        # the wall and stop the free trace there.
+        self.occupied_stop = (
+            occupied_stop if occupied_stop is not None else self.display_l_occ)
 
         self._log = np.zeros((height, width), dtype=np.float32)
 
@@ -46,7 +59,8 @@ class OccupancyGrid:
                     ranges, angle_min, angle_increment,
                     range_min, range_max,
                     laser_x=0.0, laser_y=0.0, laser_yaw=0.0,
-                    scan_omega=0.0, scan_time=0.0):
+                    scan_omega=0.0, scan_time=0.0,
+                    ray_dx=None, ray_dy=None, ray_dth=None):
         """
         Log-odds update for all rays in one scan — no Python loop over
         rays or cells.
@@ -61,11 +75,18 @@ class OccupancyGrid:
         implementation), giving it a net positive increment so occupied
         beats free at the wall surface.
 
-        scan_omega / scan_time enable within-scan rotation deskewing:
-        the effective heading for ray i is corrected by the rotation
-        that elapsed up to ray i's capture instant.  The corresponding
-        per-ray LiDAR origin shift is < 0.003 m for this robot geometry
-        and is deliberately ignored.
+        Deskew (caller picks whichever):
+
+          * FULL: ray_dx / ray_dy / ray_dth (length n) — per-ray robot
+            pose offset from scan-start in scan-start base frame.  Both
+            the per-ray laser ORIGIN and per-ray ray HEADING are derived
+            from these, so a robot rotating AND translating during the
+            scan still produces a coherent map update.
+          * SIMPLE: scan_omega / scan_time — yaw-only per-ray offset,
+            single shared origin.  Used as fallback.
+
+        (robot_x, robot_y, robot_theta) is the SLAM pose at scan-start
+        (i.e. the reference pose against which ray_dx/dy/dth are taken).
         """
         ranges_arr = np.asarray(ranges, dtype=np.float64)
         n = len(ranges_arr)
@@ -78,33 +99,49 @@ class OccupancyGrid:
         if not valid.any():
             return
 
-        # Per-ray deskew heading offsets (zero when no rotation)
-        if scan_omega != 0.0 and scan_time > 0.0 and n > 1:
-            yaw_offsets = scan_omega * np.linspace(0.0, scan_time, n)
+        cT0 = np.cos(robot_theta)
+        sT0 = np.sin(robot_theta)
+
+        if ray_dx is not None and ray_dy is not None and ray_dth is not None:
+            # FULL deskew: per-ray robot pose in world frame.
+            # base_world = robot_xy + R(theta_0) · ray_dxy
+            ray_dx_w = cT0 * ray_dx - sT0 * ray_dy
+            ray_dy_w = sT0 * ray_dx + cT0 * ray_dy
+            bx_w = robot_x + ray_dx_w
+            by_w = robot_y + ray_dy_w
+            theta_i = robot_theta + ray_dth
+            yaw_offsets = ray_dth        # used by ray-angle formula below
         else:
-            yaw_offsets = np.zeros(n)
+            # SIMPLE legacy: shared origin + yaw-only per-ray offset.
+            if scan_omega != 0.0 and scan_time > 0.0 and n > 1:
+                yaw_offsets = scan_omega * np.linspace(0.0, scan_time, n)
+            else:
+                yaw_offsets = np.zeros(n)
+            bx_w = np.full(n, robot_x)
+            by_w = np.full(n, robot_y)
+            theta_i = np.full(n, robot_theta) + yaw_offsets
 
-        # Laser origin in world frame — fixed for all rays in this scan
-        cT = np.cos(robot_theta)
-        sT = np.sin(robot_theta)
-        ox = robot_x + cT * laser_x - sT * laser_y
-        oy = robot_y + sT * laser_x + cT * laser_y
+        # Per-ray laser origin in world frame
+        cTi = np.cos(theta_i)
+        sTi = np.sin(theta_i)
+        ox_arr = bx_w + cTi * laser_x - sTi * laser_y
+        oy_arr = by_w + sTi * laser_x + cTi * laser_y
 
-        # Per-ray world angles (heading + laser mount + deskew + scan angle)
-        ray_angles = (robot_theta + laser_yaw + yaw_offsets
+        # Per-ray world angles (heading + laser mount + scan angle)
+        ray_angles = (theta_i + laser_yaw
                       + angle_min + np.arange(n, dtype=np.float64) * angle_increment)
 
         # Endpoint range: actual for hits, range_max for misses
         r_ep = np.where(hit, ranges_arr, np.where(valid, range_max, 0.0))
 
         # Endpoint world coordinates
-        ex = ox + r_ep * np.cos(ray_angles)
-        ey = oy + r_ep * np.sin(ray_angles)
+        ex = ox_arr + r_ep * np.cos(ray_angles)
+        ey = oy_arr + r_ep * np.sin(ray_angles)
 
         # Convert to grid cells
         inv_res = 1.0 / self.resolution
-        ox_c = int((ox - self.origin_x) * inv_res)
-        oy_c = int((oy - self.origin_y) * inv_res)
+        ox_c = np.floor((ox_arr - self.origin_x) * inv_res).astype(np.int32)
+        oy_c = np.floor((oy_arr - self.origin_y) * inv_res).astype(np.int32)
         ex_c = np.floor((ex - self.origin_x) * inv_res).astype(np.int32)
         ey_c = np.floor((ey - self.origin_y) * inv_res).astype(np.int32)
 
@@ -125,8 +162,8 @@ class OccupancyGrid:
         s_safe = np.where(n_steps > 0, n_steps, 1).astype(np.float32)  # (n,)
         t      = k_arr[np.newaxis, :] / s_safe[:, np.newaxis]           # (n, K)
 
-        cx = (ox_c + np.round(dx[:, np.newaxis] * t)).astype(np.int32)  # (n, K)
-        cy = (oy_c + np.round(dy[:, np.newaxis] * t)).astype(np.int32)  # (n, K)
+        cx = (ox_c[:, np.newaxis] + np.round(dx[:, np.newaxis] * t)).astype(np.int32)  # (n, K)
+        cy = (oy_c[:, np.newaxis] + np.round(dy[:, np.newaxis] * t)).astype(np.int32)  # (n, K)
 
         in_map = (
             (cx >= 0) & (cx < self.width) &
@@ -137,6 +174,29 @@ class OccupancyGrid:
             (k_arr[np.newaxis, :] <= n_steps[:, np.newaxis]) &
             in_map
         )
+
+        # ── Occupied-stop ──────────────────────────────────────────────
+        # For each ray, find the FIRST already-occupied cell along its
+        # path (if any).  The free trace ends at the step just BEFORE
+        # that cell — we don't free-vote walls just because pose error
+        # made our ray geometry pass a pixel to one side.  Result: real
+        # walls stay put across scans, the matcher keeps its anchor.
+        cx_safe = np.clip(cx, 0, self.width - 1)
+        cy_safe = np.clip(cy, 0, self.height - 1)
+        occupied_along = (in_map &
+                          (self._log[cy_safe, cx_safe] > self.occupied_stop))
+        # Mask out the endpoint cell so a ray that ENDS on its own wall
+        # doesn't self-stop one cell short.
+        endpoint_mask = (k_arr[np.newaxis, :] == n_steps[:, np.newaxis])
+        occupied_along = occupied_along & ~endpoint_mask
+        # First occupied step per ray (or n_steps+1 = "never")
+        K = max_steps + 1
+        first_hit = np.where(
+            occupied_along.any(axis=1),
+            occupied_along.argmax(axis=1),
+            K)
+        # Free-vote only steps strictly BEFORE first_hit
+        active = active & (k_arr[np.newaxis, :] < first_hit[:, np.newaxis])
 
         flat_free = cy[active] * self.width + cx[active]
         counts_free = np.bincount(flat_free, minlength=self.width * self.height)

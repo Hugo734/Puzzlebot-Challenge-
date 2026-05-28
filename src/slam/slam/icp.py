@@ -141,39 +141,66 @@ def _pose_to_transform(dx, dy, dtheta):
 
 def scan_to_points(ranges, angle_min, angle_increment, range_min, range_max,
                    laser_x=0.0, laser_y=0.0, laser_yaw=0.0,
-                   scan_omega=0.0, scan_time=0.0):
+                   scan_omega=0.0, scan_time=0.0,
+                   ray_dx=None, ray_dy=None, ray_dth=None):
     """
-    Project a laser scan into the robot base frame, with optional per-ray
-    within-scan rotation deskewing.
+    Project a laser scan into the SCAN-START robot base frame, with
+    per-ray deskew.
 
-    At 10 Hz with 360 rays the laser sweeps for ~100 ms; during that
-    window the robot's heading changes by ω·scan_time, so ray i —
-    captured at fraction f_i of the sweep — must be rotated by ω·f_i·dt
-    relative to the scan-start heading.  Without this correction the
-    point cloud is *sheared* whenever the robot turns, and ICP / CSM
-    interpret the shear as a bogus pose-rotation, which is the most
-    common cause of "the map rotates while I drive" symptoms.
+    Two deskew modes (per-ray pose wins when both are given):
 
-    Set scan_omega=0 (default) to disable deskewing.
+      * FULL (preferred): pass `ray_dx`, `ray_dy`, `ray_dth` arrays of
+        length n.  Each entry is the robot's pose delta from scan-start
+        to that ray's capture time, expressed in the scan-start base
+        frame.  Caller computes these by interpolating the odom buffer
+        at each ray's timestamp — this gives a clean cloud even when ω
+        is non-constant during the scan AND when linear motion adds a
+        per-ray laser-origin shift (≈3 cm at 0.3 m/s · 100 ms).
+
+      * SIMPLE (legacy): pass `scan_omega` and `scan_time`.  Each ray's
+        angle is rotated by ω·f·dt, assuming ω is constant during the
+        scan and ignoring translation.  Adequate when ω is small and
+        the robot is roughly stationary; degrades during fast turns.
+
+    Pass nothing to disable deskew entirely (raw single-pose cloud).
     """
     n       = len(ranges)
     angles  = angle_min + np.arange(n) * angle_increment
     ranges  = np.array(ranges, dtype=np.float64)
     valid   = np.isfinite(ranges) & (ranges >= range_min) & (ranges <= range_max)
 
-    # Per-ray deskew heading offset
-    if scan_omega != 0.0 and scan_time > 0.0 and n > 1:
-        f = np.arange(n, dtype=np.float64) / (n - 1)
-        angles = angles + scan_omega * f * scan_time
-
-    r       = ranges[valid]
-    a       = angles[valid]
-    xl      = r * np.cos(a)
-    yl      = r * np.sin(a)
     cL, sL  = math.cos(laser_yaw), math.sin(laser_yaw)
-    xs      = laser_x + cL * xl - sL * yl
-    ys      = laser_y + sL * xl + cL * yl
-    return np.column_stack((xs, ys))
+
+    # Hit point in the LASER frame at each ray's capture time
+    cosa = np.cos(angles)
+    sina = np.sin(angles)
+    rxl = ranges * cosa
+    ryl = ranges * sina
+
+    # → BASE-at-capture frame (apply the static base→laser transform)
+    bx_cap = laser_x + cL * rxl - sL * ryl
+    by_cap = laser_y + sL * rxl + cL * ryl
+
+    if ray_dx is not None and ray_dy is not None and ray_dth is not None:
+        # FULL per-ray pose deskew — express each hit in SCAN-START base
+        # frame using the robot's pose delta at the ray's capture time.
+        cdt = np.cos(ray_dth)
+        sdt = np.sin(ray_dth)
+        xs = ray_dx + cdt * bx_cap - sdt * by_cap
+        ys = ray_dy + sdt * bx_cap + cdt * by_cap
+    elif scan_omega != 0.0 and scan_time > 0.0 and n > 1:
+        # SIMPLE legacy yaw-only deskew (kept for callers without odom).
+        f = np.arange(n, dtype=np.float64) / (n - 1)
+        dth = scan_omega * f * scan_time
+        cdt = np.cos(dth)
+        sdt = np.sin(dth)
+        xs = cdt * bx_cap - sdt * by_cap
+        ys = sdt * bx_cap + cdt * by_cap
+    else:
+        xs = bx_cap
+        ys = by_cap
+
+    return np.column_stack((xs[valid], ys[valid]))
 
 
 # ──────────────────────────────────────────────────────────────────
