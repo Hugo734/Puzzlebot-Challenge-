@@ -9,7 +9,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     puzzlebot_description = get_package_share_directory("description")
 
-    model_path = os.path.join(puzzlebot_description, "urdf", "puzzlebot.urdf.xacro")
+    model_path = os.path.join(puzzlebot_description, "urdf", "puzzlebot_final.urdf.xacro")
     rviz_config = os.path.join(puzzlebot_description, "rviz", "puzzlebot_rviz.rviz")
 
     robot_description = ParameterValue(

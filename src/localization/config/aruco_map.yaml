@@ -1,0 +1,60 @@
+aruco_localizer:
+  ros__parameters:
+    # ── ArUco detector ────────────────────────────────────────────────────
+    aruco_dictionary: "DICT_4X4_50"   # must match the printed markers
+    marker_length: 0.05               # physical side length (m)
+
+    # ── Geometry ──────────────────────────────────────────────────────────
+    # Height of the marker centre above the floor (m).  All markers share
+    # this value; adjust if they are mounted at a non-standard height.
+    marker_height: 0.25
+
+    # ── TF frames ─────────────────────────────────────────────────────────
+    camera_frame: "camera_link"
+    base_frame:   "base_footprint"
+
+    # ── Detection quality thresholds ──────────────────────────────────────
+    # Detections beyond this distance are discarded (marker too small/blurry).
+    max_detection_dist: 3.0           # m
+
+    # Correction is rejected if it differs from the current EKF estimate
+    # by more than this distance.  Set large (e.g. 10.0) on first boot so
+    # the initial absolute localisation is always accepted.
+    jump_threshold: 1.0               # m
+
+    # ── Measurement covariance (adaptive) ────────────────────────────────
+    # cov = base_cov * (1 + k * dist²)
+    # Tighter than ICP because ArUco gives absolute pose, not relative.
+    # These values feed /pose_measurement; the EKF also applies its own
+    # r_x/r_y/r_theta — tune those in ekf_params.yaml as well.
+    base_cov_xy:    0.010   # m²
+    base_cov_theta: 0.005   # rad²
+    cov_dist_k:     0.04    # penalty factor per m²
+
+    # ── Camera intrinsics (from perception/config/camera_params.yaml) ─────
+    # Row-major 3×3  [fx 0 cx / 0 fy cy / 0 0 1]
+    camera_matrix: [323.439246, 0.0, 140.158238,
+                    0.0, 431.365170, 111.221576,
+                    0.0, 0.0, 1.0]
+    # [k1, k2, p1, p2, k3]
+    distortion_coefficients: [0.105333, 0.320207, -0.006615, -0.023090, -1.054484]
+
+    # ── Marker map (parallel arrays — indices must match) ─────────────────
+    # x, y : marker centre in the map frame (m)
+    # theta : direction the marker FACE points in the horizontal map plane (rad)
+    #         0=+X(east), π/2=+Y(north), π=-X(west), 3π/2=-Y(south)
+    #
+    # Layout (warehouse at scale):
+    #   South wall  (y≈0.0,  markers face north  θ=π/2)     IDs: 0 1 2
+    #   East  wall  (x≈4.84, markers face west   θ=π)        IDs: 3 4 5
+    #   North wall  (y≈3.66, markers face south  θ=3π/2)     IDs: 6 8 9
+    #   West  wall  (x≈0.0,  markers face east   θ=0)        IDs: 10 11 12
+    #   Interior    (racks/rollers)                           IDs: 13 14 15 16
+    marker_ids:   [0,    1,    2,    3,     4,     5,     6,     8,     9,     10,   11,   12,    13,   14,    15,    16   ]
+    marker_x:     [1.27, 3.07, 4.27, 4.84,  4.84,  4.84,  4.27,  3.075, 1.27,  0.0,  0.0,  0.0,   1.27, 2.35,  2.35,  3.34 ]
+    marker_y:     [0.0,  0.0,  0.0,  0.525, 1.86,  3.185, 3.66,  3.66,  3.66,  3.43, 2.05, 0.755, 1.24, 1.235, 2.425, 1.96 ]
+    marker_theta: [1.5708, 1.5708, 1.5708,
+                   3.1416, 3.1416, 3.1416,
+                   4.7124, 4.7124, 4.7124,
+                   0.0,    0.0,    0.0,
+                   3.1416, 0.0,    0.0,    3.1416]

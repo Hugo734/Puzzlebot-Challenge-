@@ -198,15 +198,19 @@ class NavNode(Node):
             self._resolution = 0.05
 
         # ── Load waypoints ─────────────────────────────────────────────
-        self.get_logger().info(f'Loading waypoints from {waypoints_yaml}')
-        try:
-            self._waypoints = load_waypoints(waypoints_yaml)
-            self.get_logger().info(
-                f'Waypoints loaded: {list(self._waypoints.keys())}'
-            )
-        except Exception as exc:
-            self.get_logger().error(f'Failed to load waypoints: {exc}')
+        if self._system_mode == 'MAPPING':
+            self.get_logger().info('Mapping mode — skipping waypoints load')
             self._waypoints = {}
+        else:
+            self.get_logger().info(f'Loading waypoints from {waypoints_yaml}')
+            try:
+                self._waypoints = load_waypoints(waypoints_yaml)
+                self.get_logger().info(
+                    f'Waypoints loaded: {list(self._waypoints.keys())}'
+                )
+            except Exception as exc:
+                self.get_logger().warn(f'No waypoints file found, starting empty: {exc}')
+                self._waypoints = {}
 
         # ── Navigation state ───────────────────────────────────────────
         self._pose_x: Optional[float] = None

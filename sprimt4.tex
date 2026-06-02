@@ -1,0 +1,728 @@
+\documentclass[conference]{IEEEtran}
+
+% ── Packages ────────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{cite}
+\usepackage{enumitem}
+\usepackage{xcolor}
+
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+
+% ════════════════════════════════════════════════════════════════════════════
+\begin{document}
+
+\title{Sprint 4 Results Evaluation:\\
+Puzzlebot Challenge --- TE3003B}
+
+\author{
+\IEEEauthorblockN{
+Juan José Jáuregui Barba A00836722 \\
+Victor Alejandro Meneses Garza A01384002 \\
+Rosendo De Los Rios Moreno A01198515 \\
+Jordan Palafox Salinas A00835705 \\
+Hugo Daniel Castillo Ovando A00836025
+}
+}
+\maketitle
+
+% ── Abstract ─────────────────────────────────────────────────────────────────
+\begin{abstract}
+This report documents the progress of Sprint~4 of the TE3003B
+\textit{Puzzlebot Challenge} project. Building on the components delivered
+in Sprint~3 (EKF, occupancy grid, SLAM prototype, A* + Bug1 navigation in
+simulation, YASMIN state machine skeleton, Flask dashboard prototype, and
+LPC + VQ voice module), Sprint~4 closed the remaining gaps toward real-robot
+deployment: the SLAM and real-world mapping stack was debugged and validated
+on hardware (DDS, clock offsets, QoS, TF pipeline); a rolling LiDAR local
+costmap with temporal decay was added to navigation; the dashboard received
+live map rendering and voice-command dispatch; the HMM speech recognizer path
+was fixed and ten per-word models trained; the Forklift FSM was packaged as
+an independent submodule; the lifter mechanism was redesigned with a
+servo + FPGA assembly and validated end-to-end on the physical robot; and the
+URDF model, lifter meshes, and Gazebo simulation world were finalized.
+The complete architecture now runs end-to-end in simulation and the
+real-world mapping and lifting pipelines have been validated on the Jetson Nano.
+\end{abstract}
+
+\begin{IEEEkeywords}
+ROS~2, Puzzlebot, EKF, ICP, SLAM, A*, Bug1, local costmap, QR alignment,
+pure pursuit, Bézier, YASMIN, FPGA, ArUco, HMM, speech recognition,
+dashboard, Flask, SocketIO
+\end{IEEEkeywords}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Introduction}
+
+Sprint~4 was the hardware-integration and closing sprint. Sprint~3 delivered
+functional components validated in simulation: an EKF with ICP corrections,
+an occupancy grid built from simulated scans, A* + Bug1 + PID navigation
+tested in Gazebo, a YASMIN state machine with the full state topology, an
+HMM-based voice node, a Flask dashboard prototype, and the forklift HAL with
+Jetson.GPIO. The goal of Sprint~4 was to bring each of those components to
+hardware readiness and to close the remaining open items.
+
+The team's core design decision remained unchanged:
+\textbf{the entire stack is a custom implementation}. Nav2, Whisper, and
+\texttt{robot\_localization} are not used.
+
+
+\begin{table}[h]
+\caption{Tasks planned on the Sprint 4 board}
+\label{tab:sprint4_board}
+\renewcommand{\arraystretch}{1.2}
+\centering
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.85\columnwidth}}
+\toprule
+\textbf{Task} \\
+\midrule
+Full system integration test on real hardware \\
+QR-based visual alignment (docking to pallet position) \\
+Real-world mapping stack on Jetson Nano \\
+Local costmap with temporal decay \\
+Dashboard: live occupancy-grid rendering \\
+Dashboard: voice-command dispatch \\
+HMM voice recognizer fix + 11-word model training \\
+Forklift FSM submodule \\
+SPI Jetson--FPGA validation \\
+ArUco--EKF bridge node \\
+CNN trailer detection \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Sprint 4 Progress by Deliverable}
+
+\subsection{M1. Industrial Standards in Robotics}
+
+Documentation was updated to cover two additional standards relevant to
+mobile robots that operate alongside humans:
+
+\paragraph{ISO 10218-1/2 (Industrial robot safety)} the standard defines
+safety requirements for industrial robot systems and integration. Applied to
+the Puzzlebot:
+\begin{itemize}[noitemsep, leftmargin=*]
+  \item \textbf{Speed and separation monitoring:} maximum translational
+        velocity capped at 0.3~m/s via \texttt{nav\_params.yaml}; the
+        Bug1 node enforces a minimum separation distance from obstacles.
+  \item \textbf{Protective stop:} the \texttt{stop} voice token and the
+        dashboard emergency button publish zero velocity to \texttt{/cmd\_vel}
+        and raise \texttt{stop\_flag} in the YASMIN blackboard within one
+        control cycle.
+\end{itemize}
+
+\paragraph{ISO 13482 (Personal care robots — safety)} although the Puzzlebot
+is a warehouse AMR, ISO~13482 provides the risk-assessment framework for
+mobile service robots. The OWL ontology completed in Sprint~3 was extended
+with classes \texttt{HazardZone} and \texttt{SafetyConstraint} linked to the
+robot's workspace zones.
+
+\subsection{M2. FPGA for the Forklift }
+
+The \texttt{lifting} package from Sprint~3 was validated on hardware and the
+Forklift FSM was packaged as an independent git submodule
+(\texttt{src/forklift\_fsm}). Sprint~4 closes the loop: the full
+servo + FPGA lifter assembly was mechanically redesigned, fabricated, and
+demonstrated working end-to-end on the physical robot.
+
+\paragraph{HAL validation} the \texttt{lifting\_node} was tested on the
+Jetson Nano with the real FPGA. The three GPIO pins (BCM~11, 13, 15) are
+written correctly by the ROS~2 node; the FPGA decodes the binary value and
+drives the servo to the corresponding height level. Named level constants
+in \texttt{lifting\_params.yaml}:
+
+\begin{itemize}[noitemsep, leftmargin=*]
+  \item \texttt{level\_rest = 0} — fully lowered
+  \item \texttt{level\_transport = 1} — travel height
+  \item \texttt{level\_pick\_floor = 3} — insert forks at floor level
+  \item \texttt{level\_carry = 4} — carry height (after pick)
+  \item \texttt{level\_pick\_rack2 = 5} — rack level~2 pick
+  \item \texttt{level\_max = 7} — maximum height
+\end{itemize}
+
+\paragraph{Forklift FSM submodule} the Forklift finite-state machine was
+separated into an independent repository and added as a git submodule at
+\texttt{src/forklift\_fsm}. This allows the FPGA firmware team to develop
+independently while the ROS~2 stack consumes the interface through the
+\texttt{lifting\_node}.
+
+\paragraph{New lifter mechanical design} the lifter mechanism was redesigned
+from scratch for Sprint~4. The new design uses a servo motor driven by the
+FPGA output and a custom-machined carriage to achieve the eight height levels
+defined in Table~\ref{tab:lifter_encoding}. Figure~\ref{fig:lifter_cad} shows
+the CAD model; Figure~\ref{fig:lifter_demo} links to the validation video.
+
+% ── IMAGE 1 ─────────────────────────────────────────────────────────────────
+% Place: img/lifter_cad.png
+% Content: CAD render or screenshot of the new lifter design showing the
+%          servo mount, carriage rail, and fork assembly.  Isometric view
+%          preferred.  Export from your CAD tool at ≥1920 px wide.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{img/lifter_cad.png}
+  \caption{CAD model of the redesigned lifter assembly. The servo (driven by
+           the FPGA output) translates the 3-bit GPIO command into one of
+           eight discrete fork heights via a captive carriage mechanism.}
+  \label{fig:lifter_cad}
+\end{figure}
+
+% ── VIDEO LINK ───────────────────────────────────────────────────────────────
+% Replace the placeholder URL below with the actual Google Drive share link
+% once the video is uploaded.
+\begin{figure}[htbp]
+  \centering
+  \fbox{\parbox{0.9\columnwidth}{\centering\vspace{4pt}
+    \textbf{Lifter demo video} \\[4pt]
+    Servo + FPGA end-to-end test: ROS~2 publishes \texttt{/lifter\_level}
+    commands 0--7; the Jetson writes the GPIO bits; the FPGA drives the servo
+    through all eight height levels. \\[6pt]
+    \href{https://drive.google.com/file/d/1Sq8gjUPFCLl14B59_lK673tai0RfwYfN/view?usp=sharing}{%
+      \texttt{drive.google.com/lifter_servo_fpga}} \\[4pt]
+  }}
+  \caption{Lifter validation demo (Google Drive). The video shows the complete
+           command chain: \texttt{lifting\_node} → GPIO → FPGA → servo →
+           fork height.}
+  \label{fig:lifter_demo}
+\end{figure}
+
+\begin{table}[h]
+\caption{Binary encoding of the forklift (3 GPIO → FPGA)}
+\label{tab:lifter_encoding}
+\renewcommand{\arraystretch}{1.2}
+\centering
+\begin{tabular}{ccc>{\raggedright\arraybackslash}p{3.5cm}}
+\toprule
+\textbf{Level} & \textbf{GPIO} & \textbf{Use} \\
+\midrule
+0 & 000 & Rest / fully lowered \\
+1 & 001 & Transport height \\
+2 & 010 & Level 2 \\
+3 & 011 & Pick pallet on floor \\
+4 & 100 & Carry height \\
+5 & 101 & Pick pallet rack level 2 \\
+6 & 110 & Level 6 \\
+7 & 111 & Maximum height \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{M3. Automatic Map Creation}
+
+The real-world mapping stack was the first major hardware challenge of the
+sprint. Three separate issues prevented the occupancy grid from being built
+correctly on the Jetson:
+
+\paragraph{DDS and clock offset} FastDDS required \texttt{IGN\_IP=localhost}
+to avoid multicast discovery collisions with the simulation host. A persistent
+clock offset between the Jetson system clock and the ROS~2 Time source caused
+the TF tree to reject laser transforms; this was resolved by switching the
+SLAM node to wall-clock time and adding a \texttt{transform\_tolerance} of
+0.3~s to all TF lookups.
+
+\paragraph{QoS mismatch} the LiDAR driver published \texttt{BEST\_EFFORT}
+scans while the SLAM node expected \texttt{RELIABLE}; the resulting silent
+drop of every scan meant the map never updated. The real-world launch file
+was updated to match QoS profiles.
+
+\paragraph{ICP improvements} the \texttt{icp.py} implementation received
+major improvements: dynamic keyframe management, outlier
+rejection with a distance threshold, and a minimum-correspondences guard that
+prevents degenerate solutions in low-feature corridors.
+
+\paragraph{Occupancy grid} \texttt{slam\_node.py}:
+raycasting was rewritten with Bresenham's algorithm for speed, incremental
+log-odds update was replaced with a probabilistic model, and a saved-map
+loader was added so the robot can start a session with a pre-built map.
+After these fixes, the Jetson Nano builds a clean, smear-free occupancy grid
+from the RPLidar A1 in real-world conditions.
+
+% ── IMAGE 2 ─────────────────────────────────────────────────────────────────
+% Place: img/real_world_map.png
+% Content: Screenshot of RViz2 showing the occupancy grid built on the
+%          real Jetson Nano.  The warehouse perimeter walls and rack
+%          obstacles should be clearly visible.  Side-by-side with the
+%          Gazebo simulation map is ideal.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{img/real_world_map.jpeg}
+  \caption{Occupancy grid built on the Jetson Nano with the corrected
+           real-world SLAM stack. Left: Gazebo simulation reference map.
+           Right: map built from the physical RPLidar A1 scan in the lab.}
+  \label{fig:real_map}
+\end{figure}
+
+\subsection{MR. Digital Twin --- Gazebo Simulation}
+
+The warehouse Gazebo world was updated to match the physical competition
+environment: rack models (\texttt{rack.dae}) were authored from scratch,
+collision geometry was tuned in \texttt{model.sdf}, and the URDF xacro
+was consolidated into a single \texttt{gazebo.launch.py} bringup file.
+The digital twin allows full stack validation (SLAM, navigation, QR
+alignment, lifter) without hardware access.
+
+% ── IMAGE: digital twin ──────────────────────────────────────────────────────
+% Place: img/gazebo_digital_twin.png
+% Content: Gazebo GUI screenshot of the warehouse simulation world showing:
+%   - The robot inside the warehouse floor plan
+%   - At least one rack model with its collision mesh visible (View > Collisions)
+%   - Ideally RViz2 side-by-side or inset: the occupancy grid the SLAM node
+%     builds from simulated LiDAR in the same session
+%   Capture at a top-down or 45° isometric camera angle so the layout is clear.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{img/gazebo_digital_twin.jpeg}
+  \caption{Gazebo digital twin of the competition warehouse. The scene
+           includes the rack obstacles (\texttt{rack.dae}) and the
+           Puzzlebot model. The inset shows the occupancy grid produced
+           by the SLAM node from simulated LiDAR in the same session.}
+  \label{fig:gazebo_twin}
+\end{figure}
+
+\subsection{M4. Voice Commands to Control the Robot}
+
+The HMM-based speech recognizer inherited from Sprint~3 had a path
+resolution bug that caused it to search for model files in a hardcoded
+directory that does not exist after installation via \texttt{pip install -e}.
+The fix resolves the model path using \texttt{importlib.resources} (or a
+\texttt{pkg\_resources} fallback), making the node portable across any
+workspace layout.
+
+Eleven HMM models (\texttt{.npz}) were trained and committed:
+\texttt{start, stop, forward, backward, left, right, lift, leave,
+break, continue, resume}.
+
+\paragraph{Recognition pipeline}
+\[
+  \text{Audio} \xrightarrow{\text{VAD}} \xrightarrow{\text{MFCC}}
+  \xrightarrow{\text{HMM}} \text{command}
+\]
+
+The VAD (voice activity detection) uses an adaptive energy threshold; each
+segment is processed with LPC order~12, converted to Line Spectral
+Frequencies (LSF), and scored against each per-word HMM. The word with the
+highest log-likelihood wins.
+
+The node publishes recognized tokens to \texttt{/voice\_command}; the
+\texttt{stop} and \texttt{pause} tokens are consumed directly by the YASMIN
+blackboard.
+
+% ── IMAGE 3 ─────────────────────────────────────────────────────────────────
+% Place: img/voice_pipeline.png
+% Content: Confusion matrix of the HMM recognizer evaluated on the
+%          11-word vocabulary.  Each row = true label, each column =
+%          predicted label.  Diagonal should show per-word accuracy.
+%          Generate with the test script in voice_control/scripts/.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{img/voice_pipeline.jpeg}
+  \caption{Confusion matrix of the LPC + HMM recognizer on the 11-word
+           vocabulary. Diagonal cells show per-word recognition accuracy.}
+  \label{fig:voice_confusion}
+\end{figure}
+
+\subsection{MR. Reference Detection --- ArUco }
+
+The ArUco detector (\texttt{aruco\_detector.py}) was finalized in Sprint~3
+and remained unchanged in Sprint~4. It is compatible with OpenCV~4.6 and
+4.7+ through a version-detection shim applied at import time. Each detected
+marker's full 3D pose (rvec + tvec → quaternion) is published to
+\texttt{/aruco\_poses} (\texttt{PoseArray}).
+
+\textbf{Pending:} the bridge that converts \texttt{/aruco\_poses} to
+\texttt{PoseWithCovarianceStamped} on \texttt{/pose\_measurement} (the EKF
+input) was not completed in this sprint.
+
+\subsection{MR. Localization --- EKF + ICP }
+
+The EKF node from Sprint~2 was kept intact. The ICP improvements in
+Sprint~4 (better keyframe policy, outlier rejection) translate directly into
+more accurate pose corrections published to \texttt{/pose\_measurement},
+which the EKF fuses in its update step.
+
+\textbf{Status:} EKF + ICP localization is functional on the real robot.
+ArUco absolute corrections remain pending (bridge node not implemented).
+
+\subsection{MR. Navigation}
+
+The navigation stack received one significant addition in Sprint~4:
+
+\paragraph{Local costmap} \texttt{local\_costmap.py} implements
+a world-anchored, rolling LiDAR costmap with temporal decay:
+
+\begin{itemize}[noitemsep, leftmargin=*]
+  \item A square patch of the world, centred on the robot, stores float
+        scores in $[0, 1]$ per cell.
+  \item Scan hits raise the cell score to 1.0.
+  \item Each control cycle applies exponential decay:
+        $\text{score} \leftarrow \text{score} \cdot e^{-\Delta t/\tau}$,
+        so transient detections (a person walking past) fade within $\sim$1~s
+        while persistent obstacles stay occupied.
+  \item The patch re-centres on demand; cells that leave the patch are
+        dropped and new cells start at~0.
+\end{itemize}
+
+The local costmap feeds the Bug1 avoidance logic and the stuck detector in
+\texttt{nav\_node.py}, replacing direct polling of the raw \texttt{/scan}
+topic with a smoothed, decayed occupancy signal.
+
+% ── IMAGE 4 ─────────────────────────────────────────────────────────────────
+% Place: img/local_costmap.png
+% Content: RViz2 screenshot showing the local costmap (colored grid patch)
+%          overlaid on the global occupancy grid while the robot navigates.
+%          Show at least one obstacle with its decay trail.
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{img/local_costmap.png}
+  \caption{Local costmap overlay during navigation in Gazebo. The rolling
+           patch is centred on the robot; decaying scores (lighter cells)
+           mark the trail of a transient obstacle.}
+  \label{fig:costmap}
+\end{figure}
+
+The \texttt{nav\_node.py} was also significantly refactored:
+replanning on stuck detection, goal tolerance parameterisation, and
+integration of the local costmap signal for reactive avoidance.
+\texttt{navigation\_real.launch.py} was added as the real-robot
+navigation launch file.
+
+\subsection{MR. Target Detection and Alignment}
+
+This subsystem received the most development effort of the sprint. Three
+independent QR-based visual alignment strategies were implemented in the
+\texttt{perception} package:
+
+\paragraph{Strategy 1: Scripted state machine (\texttt{qr\_alignment.py})}
+
+States: \texttt{IDLE → SEARCH → CENTER\_QR → ALIGN → DOCK → DONE}.
+The robot first centres the QR marker in the camera frame (correcting heading
+only), then aligns perpendicular to the QR without advancing (maintaining
+distance $\geq D_{\text{dock}} + \text{margin}$ by forcing $v=0$ when too
+close), and finally docks straight in. An exponential moving average (EMA)
+filter on the PnP geometry reduces jitter from the 30~mm QR at 320$\times$240
+resolution.
+
+\paragraph{Strategy 2: Cubic Bézier + pure pursuit
+(\texttt{qr\_path\_alignment.py})}
+
+At every 10~Hz tick with a fresh detection:
+\begin{enumerate}[noitemsep, leftmargin=*]
+  \item Compute the goal pose in the robot frame: a point $D_{\text{dock}}$
+        in front of the QR along its normal, facing the QR.
+  \item Plan a cubic Bézier curve from $(0,0,0)$ to the goal with tangents
+        that respect the initial and final headings.
+  \item Pure pursuit: find the look-ahead point on the curve and command
+        $v$ and $\omega$ to track it.
+\end{enumerate}
+Continuous replanning makes the path adapt to detection jitter without
+discrete state transitions.
+
+\paragraph{Strategy 3: Parabola + wheel odometry
+(\texttt{qr\_quad\_alignment.py})}
+
+\begin{enumerate}[noitemsep, leftmargin=*]
+  \item \textbf{PLAN:} at detection, snapshot the QR pose. Compute the goal
+        and plan a parabola $y = ax^2$ in the robot frame. Reset wheel
+        odometry.
+  \item \textbf{FOLLOW:} pure pursuit on the parabola using
+        \textit{only wheel odometry} (from \texttt{odometry\_tracker.py}).
+         No QR dependence — robust to occlusion during travel.
+  \item \textbf{DOCK:} final straight approach with QR feedback if visible,
+        open-loop otherwise.
+\end{enumerate}
+
+\paragraph{Camera calibration (\texttt{camera\_calibration.py})}
+
+A ROS~2 node for interactive checkerboard calibration was implemented.
+It subscribes to \texttt{/cam\_img}, accumulates corner detections with
+SPACE, and computes the camera matrix $\mathbf{K}$ and distortion
+coefficients $\mathbf{d}$ via OpenCV Zhang's method. Results are written to
+\texttt{config/camera\_params.yaml} in the format expected by the QR pose
+detector.
+
+\paragraph{QR pose detector (\texttt{qr\_pose\_detector.py})}
+
+Loads the calibrated intrinsics, decodes QR codes with \texttt{pyzbar},
+estimates the 3D pose (solvePnP with the four corner correspondences), and
+publishes to \texttt{/aruco\_poses} (\texttt{PoseArray}) — the same topic
+as the ArUco detector, so the state machine consumes a single alignment
+topic regardless of marker type.
+
+% ── IMAGE 5 ─────────────────────────────────────────────────────────────────
+% Place: img/qr_alignment.png
+% Content: Four-panel figure:
+%   (a) camera frame showing the detected QR with its axes overlay (PnP result)
+%   (b) top-down diagram of the planned Bézier / parabola path from robot
+%       to docking pose
+%   (c) terminal screenshot or plot showing alignment error converging to 0
+%   (d) photo of the robot docked in front of the QR-marked pallet position
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{img/qr_alignment.jpeg}
+  \caption{QR-based visual alignment. (a)~Detected QR with 3-D pose axes
+           overlaid (PnP). (b)~Planned Bézier path from current robot pose
+           to docking pose. (c)~Bearing and lateral error converging to zero
+           during a FOLLOW→DOCK sequence.}
+  \label{fig:qr_align}
+\end{figure}
+
+\subsection{MR. Web Interface with Telemetry }
+
+The Flask + SocketIO dashboard was completed in Sprint~3 and extended in
+Sprint~4 with two new capabilities:
+
+\paragraph{Live map rendering} \texttt{ros\_bridge.py} was extended to subscribe to \texttt{/map} (\texttt{OccupancyGrid}), encode each
+update as a PNG, and push it to the frontend via a SocketIO
+\texttt{map\_update} event. The frontend renders it on an HTML5 canvas,
+overlaying the robot pose marker. This replaced the earlier static-map
+approach and gives operators real-time SLAM feedback without RViz~2.
+
+\paragraph{Voice-command dispatch} the frontend received a voice-command
+panel: a microphone button records audio directly in the browser, sends it
+to the Flask \texttt{/api/voice} endpoint as WebM, which is decoded with
+\texttt{pydub} + \texttt{ffmpeg}, resampled to 16~kHz, and forwarded to
+the HMM recognizer. The recognized token is published to
+\texttt{/voice\_command}.
+
+\paragraph{Final architecture}
+\begin{itemize}[noitemsep, leftmargin=*]
+  \item \textbf{Backend:} \texttt{dashboard\_node.py} subscribes to all
+        telemetry topics and forwards them via SocketIO.
+        \texttt{ros\_bridge.py} publishes to \texttt{/cmd\_vel} and
+        \texttt{/mission} from Flask routes.
+  \item \textbf{Frontend:} canvas map, MJPEG camera feed, telemetry panel
+        (pose, YASMIN state, active mission), teleoperation controls, and
+        voice-command microphone.
+  \item \textbf{Safety watchdog:} 350~ms timer publishes zero velocity if
+        no teleoperation commands arrive (dead man's switch).
+\end{itemize}
+
+\begin{figure}[htbp]
+  \centering
+  \fbox{\parbox{0.9\columnwidth}{\centering\vspace{4pt}
+    \textbf{All Sprint~4 demo videos} \\[4pt]
+    Mapping, navigation, QR alignment, lifter servo, dashboard live feed,
+    and voice command demos. \\[6pt]
+    \href{https://drive.google.com/drive/folders/1CV6YNE6Rj2bZOIr3SCd7zk2VpTP_-eQ4?usp=sharing}{%
+      \texttt{drive.google.com/drive/folders/1CV6YNE6Rj2bZOIr3SCd7zk2VpTP\_-eQ4}} \\[4pt]
+  }}
+  \caption{Google Drive folder with all Sprint~4 demonstration videos.}
+  \label{fig:all_videos}
+\end{figure}
+
+The source code for all packages is at
+\url{https://github.com/Hugo734/Puzzlebot-Challenge-}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Final System Architecture}
+
+Table~\ref{tab:packages} summarises the eight packages that make up the
+final system after Sprint~4.
+
+\begin{table}[h]
+\caption{ROS~2 packages in the final system}
+\label{tab:packages}
+\renewcommand{\arraystretch}{1.2}
+\centering
+\begin{tabular}{>{\raggedright}p{2.2cm}
+                >{\centering}p{1.1cm}
+                >{\raggedright\arraybackslash}p{4.0cm}}
+\toprule
+\textbf{Package} & \textbf{Language} & \textbf{Purpose} \\
+\midrule
+\texttt{localization}    & C++    & EKF + ICP + velocity bridge \\
+\texttt{slam}            & Python & OccupancyGrid + saved map \\
+\texttt{navigation}      & Python & A* + Bug1 + PID + local costmap \\
+\texttt{mission\_control} & Python & YASMIN state machine \\
+\texttt{perception}      & Python & ArUco + QR alignment + pallet \\
+\texttt{lifting}         & Python & HAL GPIO → FPGA (3 bits) \\
+\texttt{voice\_control}  & Python & LPC + HMM + parser \\
+\texttt{dashboard}       & Python & Flask + SocketIO + voice API \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Challenges Overcome}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Real-world SLAM smearing:} three independent root causes
+        (DDS multicast collision, clock offset rejecting TF frames, QoS
+        mismatch silently dropping scans) all produced the same symptom of a
+        static map. Each was diagnosed separately and fixed in the real-world
+        launch file.
+  \item \textbf{QR PnP jitter at close range:} a 30~mm QR at 320$\times$240
+        occupies only $\sim$30 pixels; the solvePnP solution jumps by several
+        centimetres between frames. An EMA filter on the geometric parameters
+        (bearing, distance, face angle) reduced the noise sufficiently for
+        stable PID control.
+  \item \textbf{Alignment during occlusion:} the Bézier strategy failed when
+        the robot's body occluded the QR at close range. The parabola +
+        odometry strategy (\texttt{qr\_quad\_alignment.py}) was developed
+        specifically to address this: odometry drives the FOLLOW phase without
+        requiring the QR to be visible.
+  \item \textbf{HMM model path after \texttt{pip install}:} the Sprint~3
+        recognizer searched a hardcoded relative path that only exists in the
+        source tree, not after installation. Switching to
+        \texttt{importlib.resources} made the node portable.
+  \item \textbf{YASMIN + ROS~2 thread safety:} the state machine runs in a
+        background thread; ROS~2 callbacks update the blackboard from the
+        executor thread. Blackboard writes are atomic for all types used
+        (str, float, dict) in CPython, which is sufficient for this use case.
+  \item \textbf{Teleoperation watchdog:} a browser disconnect left the robot
+        moving indefinitely. The 350~ms backend timer that publishes zero
+        velocity acts as a dead man's switch.
+\end{itemize}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Conclusion and Next Steps}
+
+Sprint~4 advanced the system from a simulation-validated prototype to a
+hardware-ready stack. Real-world mapping now produces clean occupancy grids
+on the Jetson Nano; the QR alignment pipeline provides three strategies at
+increasing robustness; the dashboard gives operators live map feedback and
+voice dispatch; and the Forklift FSM is modular and independently versioned.
+
+\textbf{Remaining work for the final demonstration:}
+\begin{itemize}[noitemsep, leftmargin=*]
+  \item Record and label real waypoints on the competition track.
+  \item Select and tune the best QR alignment strategy on hardware.
+  \item Train the HMM codebooks with recordings in the noisy lab environment.
+  \item Implement the ArUco--EKF bridge node for absolute pose corrections.
+  \item Complete and validate the CNN trailer detector.
+  \item Run the full pick-and-place sequence on the physical robot.
+\end{itemize}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section*{Sprint 4 Backlog}
+
+\begin{table}[h]
+\caption{Sprint 4 Task Status}
+\label{tab:backlog}
+\renewcommand{\arraystretch}{1.2}
+\centering
+\begin{tabular}{>{\raggedright}p{3.5cm}
+                >{\centering}p{1.3cm}
+                >{\centering}p{1.1cm}
+                >{\centering\arraybackslash}p{1.0cm}}
+\toprule
+\textbf{Task} & \textbf{Assigned} & \textbf{SP} & \textbf{Status} \\
+\midrule
+Full system integration test               & Jordan    & 5 & In progress \\
+Digital twin                               & Rosendo   & 3 & In progress \\
+Vision precision validation                & Juan José & 3 & In progress \\
+Gripper testing with real boxes            & Jordan    & 3 & In progress \\
+Technical API documentation                & Rosendo   & 3 & Done \\
+Global + local navigation integration      & Jordan    & 5 & Done \\
+Detection--alignment pipeline (QR)         & Jordan    & 3 & Done \\
+ISO 10218 \& 13482 documentation           & Hugo      & 2 & Done \\
+YASMIN state machine                       & Jordan    & 5 & Done \\
+Flask + SocketIO dashboard                 & Rosendo   & 5 & Done \\
+HMM voice module + ROS~2 node             & Rosendo   & 5 & Done \\
+A* + Bug1 + PID navigation                 & Jordan    & 8 & Done \\
+Gazebo + RViz2 simulation integrated       & Jordan    & 3 & Done \\
+Real-world mapping stack                   & Jordan    & 5 & Done \\
+Local costmap                              & Jordan    & 3 & Done \\
+Camera calibration                         & Jordan    & 2 & Done \\
+Forklift FSM submodule                     & Hugo      & 3 & Done \\
+Lifter URDF + mesh finalisation            & Juan José & 3 & Done \\
+Lifter redesign + servo + FPGA demo        & Hugo      & 5 & Done \\
+Integrate ArUco with EKF                   & Juan José & 3 & In progress \\
+PID alignment with pallet                  & Victor    & 3 & In progress \\
+CNN trailer detection                      & Juan José & 5 & In progress \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section*{Individual Reflections}
+
+\subsection*{Juan José Jáuregui Barba --- A00836722}
+
+My contribution in Sprint~4 focused on the simulation model and
+hardware-ready URDF. I reorganised all lifter mesh files into a
+\texttt{lifter/} subfolder, rewrote the lifter URDF xacro to correctly
+reference the new mesh paths (carriage, inner mast, outer mast, camera
+holder), and updated \texttt{puzzlebot\_with\_lifter.urdf.xacro} with
+proper joint limits and inertial properties. I also updated the warehouse
+Gazebo world to add the rack model (\texttt{rack.dae}), which required
+authoring the DAE file from scratch and tuning the collision geometry in
+\texttt{model.sdf}. On the launch side, I removed obsolete files and
+consolidated all simulation bringup into the updated \texttt{gazebo.launch.py}.
+On Sprint~4 remaining tasks, the ArUco--EKF bridge node is my responsibility;
+I understand what it needs (convert \texttt{PoseArray} to
+\texttt{PoseWithCovarianceStamped} with a tuned covariance) and plan to
+complete it before the final demonstration.
+
+\subsection*{Victor Alejandro Meneses Garza --- A01384002}
+
+I focused on the mechanical and electronic integration of the physical robot.
+On the mechanical side, I secured the LiDAR at the correct height and
+confirmed that the TF offset in the URDF (\texttt{lidar\_joint} origin)
+matches the measured position on the chassis. On electronics, I reviewed the
+H-bridge wiring, power distribution between the Jetson, motors, and FPGA,
+and verified that the GPIO voltage levels (Jetson 3.3~V) are compatible with
+the FPGA inputs. I also began the alignment PID controller for pallet
+detection: pallet centroid detection via HSV segmentation is functional and
+the pixel error is published to \texttt{/alignment\_error}, but the PID gains
+$K_p$, $K_i$, $K_d$ have not yet been tuned on the real robot. My priority
+for the final is to finish the gain tuning and validate the alignment sequence
+end-to-end on hardware.
+
+\subsection*{Jordan Palafox Salinas --- A00835705}
+
+Sprint~4 was the most intensive sprint for me. I debugged and fixed the
+entire real-world mapping stack (DDS, clock offset, QoS mismatch, TF
+pipeline), which took two full days of hardware testing before the Jetson
+produced a clean map. I then implemented the local costmap module
+(\texttt{local\_costmap.py}) to give navigation a smoothed obstacle signal
+with temporal decay. The largest effort was the QR alignment system: I
+implemented three complete strategies---scripted state machine, Bézier +
+pure pursuit, and parabola + wheel odometry---and the associated camera
+calibration and QR pose detection nodes. The parabola + odometry approach
+emerged from the failure of the vision-only strategies when the robot's body
+occluded the QR at close range; switching to wheel odometry for the follow
+phase was the key insight. I also consolidated \texttt{sim.launch.py} and
+\texttt{real.launch.py} and added the map rendering to the dashboard.
+
+\subsection*{Hugo Daniel Castillo Ovando --- A00836025}
+
+My work in Sprint~4 covered three areas: the Forklift FSM, the new lifter
+mechanical design, and ISO documentation. I packaged the Forklift
+finite-state machine as an independent git submodule (\texttt{src/forklift\_fsm}),
+which allows the FPGA team to version their firmware independently while the
+ROS~2 stack consumes it through the \texttt{lifting\_node} interface.
+On hardware, I led the redesign of the lifter mechanism: the new assembly
+uses a servo motor controlled by the FPGA 3-bit output to reach the eight
+discrete fork heights. The design was modelled in CAD, fabricated, and
+validated end-to-end — a video of the Jetson publishing \texttt{/lifter\_level}
+commands and the servo responding through all eight levels is linked in
+Figure~\ref{fig:lifter_demo}. On ISO documentation, I mapped ISO~10218
+and ISO~13482 requirements to the specific software mechanisms in the stack
+(speed cap, protective stop, dead man's switch).
+
+\subsection*{Rosendo De Los Rios Moreno --- A01198515}
+
+In Sprint~4 I completed the voice recognition integration and the two
+dashboard extensions. On voice, I fixed the HMM model path resolution
+bug that broke the node after \texttt{pip install}, trained and committed
+eleven per-word \texttt{.npz} models, and wired the \texttt{/api/voice}
+Flask endpoint to decode WebM audio from the browser (using \texttt{pydub}
++ \texttt{ffmpeg}), resample it to 16~kHz, and pass it to the HMM
+recognizer. On the dashboard, I added the live map rendering pipeline:
+the ROS~2 \texttt{ros\_bridge.py} node subscribes to \texttt{/map},
+encodes each \texttt{OccupancyGrid} update as a PNG, and pushes it via
+SocketIO; the frontend renders it on a canvas. The result is that
+operators have real-time SLAM feedback in the browser without needing
+RViz~2. Remaining work: retraining the HMM codebooks with recordings
+from the noisy lab environment, and adding a dashboard alert when the
+YASMIN machine enters \texttt{STUCK}.
+
+\end{document}

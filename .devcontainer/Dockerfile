@@ -29,6 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xterm \
     tmux \
     micro \
+    mesa-utils \
+    libgl1-mesa-glx \
+    libgl1-mesa-dri \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install flask-socketio

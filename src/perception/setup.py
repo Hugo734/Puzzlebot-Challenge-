@@ -40,6 +40,7 @@ setup(
         'console_scripts': [
             'camera_calibration = perception.camera_calibration:main',
             'qr_quad_alignment = perception.qr_quad_alignment:main',
+            'aruco_localizer = perception.aruco_localizer:main',
         ],
     },
 )
