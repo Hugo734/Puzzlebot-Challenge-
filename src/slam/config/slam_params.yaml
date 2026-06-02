@@ -1,0 +1,311 @@
+slam_node:
+  ros__parameters:
+    # ── Grid ─────────────────────────────────────────────────────
+    resolution:   0.05          # m/cell (5 cm)
+    map_width:    400           # cells  (20 m)
+    map_height:   400           # cells  (20 m)
+
+    # ── Workspace mask (OPT-IN) ───────────────────────────────────
+    # Disabled by default because it requires the SLAM origin (robot's
+    # start pose) to be the workspace centre.  When enabled, any LiDAR
+    # endpoint outside the box is dropped at integration and a periodic
+    # scrub zeros leaked cells.  Useful for known bounded environments
+    # like a 4.86 × 3.76 m test track.
+    #
+    # To use:
+    #   1. Place the robot exactly at the CENTRE of the room, aligned
+    #      with the long axis along X.
+    #   2. Set workspace_enabled: true below.
+    #   3. (Optional) tune workspace_center_{x,y} if you start off-centre.
+    workspace_enabled:    false
+    workspace_center_x:   0.0
+    workspace_center_y:   0.0
+    workspace_size_x:     4.86   # m  (long side)
+    workspace_size_y:     3.76   # m  (short side)
+    workspace_pad:        0.40   # m  margin for pose drift / start offset
+    workspace_scrub_every: 5     # run scrub every N map publishes
+
+    # Log-odds increments + clamps.
+    #
+    # Tuning principle:  WALLS MUST BE STICKY.
+    # Earlier we lowered l_max to 2.5 hoping ghosts would fade faster,
+    # but that backfired — real walls reached the cap in ~5 hits, then
+    # any stray free-ray (e.g. a scan from a slightly wrong pose where
+    # the laser line passed 1 pixel past the wall) erased them faster
+    # than they could re-accumulate.  The matcher then lost its
+    # anchor and drifted.  Fix:
+    #   * High l_max (4.0):  walls keep building evidence after they're
+    #     first marked, so a few stray free-rays can't kill them
+    #   * Asymmetric l_min (-2.0): free space is "less remembered"
+    #   * occupied_stop (in DDA): free-rays STOP at the first cell
+    #     already over display_l_occ — walls can't be erased from
+    #     behind by a ray that should have stopped at them
+    #
+    # Ghost decay is still handled — by the integration confidence
+    # gates (integrate_max_fitness / integrate_max_*_corr) which
+    # prevent bad scans from ever being written.
+    l_occ:        0.50
+    l_free:      -0.20
+    l_min:       -2.0
+    l_max:        4.0
+
+    # Display thresholds for to_ros_data().  Higher than the update
+    # increments so only multi-scan-confirmed walls appear as occupied.
+    # Back to 2.5 (~5 hits) — 3.0 was too high and starved the map.
+    display_l_occ:   2.5
+    display_l_free: -1.2
+
+    # Occupied-stop threshold for the free-ray DDA — see OccupancyGrid
+    # docstring.  -1 = use display_l_occ.  A free-ray that would cross
+    # a cell ALREADY above this threshold ends THERE: the wall keeps
+    # its log-odds AND any wall cells behind it (in the same ray) are
+    # untouched.  This is what makes walls survive pose-error scans.
+    occupied_stop:  -1.0   # → use display_l_occ (= 2.5)
+
+    # ── Scan filtering ───────────────────────────────────────────
+    range_min:   0.12
+    range_max:   10.0
+
+    # Process every Nth ray (1 = all, higher = faster).  Using all rays
+    # gives the densest, crispest wall traces in the grid — the per-scan
+    # budget is comfortable with the cached matcher target (KDTree +
+    # normals built once per map change, not per scan), so ray_step=1
+    # is the default.  Bump to 2 only if the Jetson Nano can't keep up
+    # at 10 Hz.
+    ray_step: 1
+
+    # ── Map publish cadence ──────────────────────────────────────
+    map_publish_every: 5
+
+    # ── Map-update gating ────────────────────────────────────────
+    # Minimum motion before integrating a scan.  Looser than the
+    # angular gate below — we WANT lots of scans integrated during
+    # slow translation so the walls accumulate evidence quickly.
+    min_delta_xy:    0.02   # m
+    min_delta_theta: 0.02   # rad (~1.1°)
+    # Force an integration when the scan itself changes by this
+    # much (RMS range delta) even if odom says we haven't moved —
+    # catches silent odom drift / wheel slip.
+    min_scan_diff:   0.05   # m
+
+    # Skip log-odds integration when |ω| exceeds this threshold.
+    # Above ~0.5 rad/s the per-ray deskew is approximate (ω isn't
+    # constant within a 100 ms scan, and wheel slip biases the
+    # odom-reported ω), so integrating that scan smears walls.
+    # The matcher still runs — only the WRITE to the grid is gated.
+    # Slightly tighter than the original 0.5 to reduce rotation-spike
+    # artifacts, but loose enough that normal teleop turns still
+    # contribute scans.
+    map_update_omega_max: 0.4   # rad/s (~23°/s)
+
+    # Integration confidence gates — defence against bad-pose / bad-
+    # deskew scans contaminating the map.  The matcher's pose is
+    # accepted (so we don't lose localisation), but if it had to fight
+    # to converge, the scan is mis-shapen and we DON'T write it.
+    # Original 0.10/0.10/0.10 were tested and produced clean maps;
+    # tightening further starves the map of contributions.
+    integrate_max_fitness: 0.10   # m RMS
+    integrate_max_xy_corr: 0.10   # m
+    integrate_max_th_corr: 0.07   # rad ~4°  (slightly tighter on rotation)
+
+    # ── ICP scan matcher ─────────────────────────────────────────
+    use_icp:                true
+    icp_max_iter:           25
+    icp_tolerance:          0.005
+    icp_reject_dist:        0.45
+    # Inlier-count gate: ICP only accepts a match if at least this many
+    # scan points fell within reject_dist of the map.
+    icp_min_points:         45
+    # RMS-of-inlier-distance ceiling.  FIXED (no adaptive scaling):
+    # 0.20 m is ~4× grid resolution, the natural noise floor for a
+    # 5 cm grid + RPLidar A1 (~3 cm range stdev).  An earlier
+    # adaptive gate tracked the median of recent fitness × a factor;
+    # that drove the gate to ~0.05 m during long stationary stretches
+    # and then rejected legitimately-larger matches the moment the
+    # robot started moving.  Fixed gate is more predictable.
+    icp_max_fitness:        0.20
+
+    # Point-to-line ICP (much more stable on long walls + corners)
+    icp_use_point_to_line:  true
+    icp_normal_neighbors:   8
+
+    # Scan-to-map matcher
+    icp_map_radius:         6.0     # m disc around robot
+    # Log-odds threshold for cells that may serve as a matcher anchor.
+    # STRICTLY HIGHER than display_l_occ (2.0) so the matcher only
+    # locks onto multi-scan-confirmed cells.  Low-evidence cells
+    # written by a single in-flight bad scan must NEVER attract the
+    # next match — otherwise the error self-perpetuates.  2.7 =
+    # display + one extra hit's worth of evidence.
+    icp_map_occ_threshold:  2.7
+    icp_map_voxel:          0.10    # m — downsample map cloud to this voxel
+    icp_map_max_pts:        3000    # cap on map cloud size (random subsample)
+
+    # Scan accumulation buffer (fallback ICP target when the map
+    # is too sparse — e.g. at startup)
+    icp_scan_accum_n:       4
+
+    # Fitness history is kept for log/debug only — gate is fixed
+    # (icp_max_fitness), not adaptive.
+    icp_fitness_history_n:  30
+
+    # Pose-jump rejection.  Wider than odom-only motion would allow
+    # because the RECOVERY CSM window (used after a fast-rotation
+    # bypass) may legitimately need to snap back a sizeable delta.
+    icp_jump_xy_max:        0.80   # m
+    icp_jump_theta_max:     0.80   # rad (~46°)
+
+    # FFT polar correlation pre-alignment — gives ICP a good
+    # rotation init when the robot is turning fast (10 Hz can lose
+    # 5–15° per scan otherwise).
+    icp_fft_prealign:       true
+    icp_fft_max_angle_deg:  30.0   # discard FFT estimate if it exceeds this
+
+    # Recovery: after N consecutive bad ICP iterations, run a
+    # particle filter over the local map cloud and snap to the
+    # best-scoring hypothesis.
+    recovery_bad_streak:    5
+    pf_n_particles:         40
+    pf_xy_spread:           0.20   # m  std-dev of xy perturbation
+    pf_theta_spread:        0.20   # rad std-dev of θ perturbation
+    pf_sigma:               0.15   # m  kernel bandwidth in the score
+
+    # ── Correlative Scan Matcher (coarse-to-fine grid search) ────
+    # Two window sets:
+    #   NORMAL    — every scan, narrow window centred on odom guess
+    #   RECOVERY  — wider window, used on the FIRST scan after a
+    #               matcher bypass (high-ω scans where we rode odom)
+    csm_enabled:            true
+    # Coarse θ window widened to ±15° (was ±5.7°): wheel slip during
+    # rotation makes odom over-report θ by several degrees, so a
+    # ±5.7° search centred on the odom guess COULDN'T REACH the true
+    # rotation and CSM converged to a wrong local minimum (= ghost
+    # walls).  ±15° covers any realistic slip per 100 ms scan.
+    csm_coarse_xy_radius:   0.40    # m
+    csm_coarse_xy_step:     0.10    # m  (= 2 cells)
+    csm_coarse_th_radius:   0.262   # rad (±15°)
+    csm_coarse_th_step:     0.035   # rad (~2°)
+    csm_fine_xy_radius:     0.10    # m
+    csm_fine_xy_step:       0.02    # m
+    csm_fine_th_radius:     0.05    # rad (±2.9°)
+    csm_fine_th_step:       0.005   # rad (~0.29°)
+    # CSM acceptance score (sum of clamped log-odds at scan points).
+    csm_min_score:          90.0
+    # Min occupied cells in the local map disc before CSM is used.
+    csm_min_occupied_cells: 30
+
+    # RECOVERY window — wider in both xy and θ.  Triggered for ONE
+    # scan after a matcher bypass to absorb the odom drift that
+    # accumulated during the bypass in a single wider search.
+    csm_recovery_xy_radius: 0.80    # m
+    csm_recovery_xy_step:   0.10    # m
+    csm_recovery_th_radius: 0.35    # rad (±20°)
+    csm_recovery_th_step:   0.035   # rad (~2°)
+
+    # ── Matcher omega bypass ─────────────────────────────────────
+    # When |ω| exceeds this, the matcher SKIPS this scan and the
+    # SLAM pose rides pure odom for that frame.  The next non-
+    # bypassed scan runs with the RECOVERY CSM window above to
+    # absorb the accumulated drift.
+    #
+    # Rationale: above ~2 rad/s the per-ray deskew is approximate
+    # (ω isn't actually constant within a 100 ms scan), so the
+    # matcher tends to lock onto a WRONG local minimum and feed
+    # bad poses to the map.  Riding odom for 1-2 scans through a
+    # fast turn, then re-engaging with the RECOVERY window, is
+    # dramatically more stable than fighting through.
+    #
+    # The map gate (map_update_omega_max above) is set LOWER than
+    # this so we also pause integration in the wider region between
+    # "should still match" and "should bypass".
+    matcher_omega_max: 1.5   # rad/s (~86°/s)
+
+    # ── Rotation correction clamp ────────────────────────────────
+    # Effectively OFF.  The clamp's premise was "wheel encoder yaw is
+    # reliable so big matcher corrections must be bad" — but with the
+    # slip the Puzzlebot has on rotation, wheel yaw is exactly the
+    # least reliable measurement, and the clamp ended up forcing
+    # SLAM to follow the (wrong) odom rather than the (right) matcher.
+    # The integration gates above are the new defence against bad
+    # matches; the rotation clamp is left in place at very loose
+    # limits as a final sanity net against insane matcher proposals.
+    rot_clamp_stationary_deg: 25.0
+    rot_clamp_slow_deg:       20.0
+    rot_clamp_fast_deg:       15.0
+    rot_clamp_slow_omega:      0.20   # rad/s
+    rot_clamp_fast_omega:      0.60   # rad/s
+
+    # ── Range outlier filter ─────────────────────────────────────
+    # RPLidar A1 occasionally emits isolated range spikes (glass,
+    # dark cloth, dust).  Rays whose value differs from BOTH polar
+    # neighbours by > outlier_max_jump are dropped — true wall
+    # edges have only ONE differing neighbour so they survive.
+    # Tightened from 0.5 → 0.3 because in this room genuine wall
+    # corners produce neighbour-deltas of ≤ 0.25 m at typical ranges,
+    # so 0.3 still keeps them while cutting more spurious spikes.
+    outlier_filter_enabled: true
+    outlier_max_jump:       0.3
+
+    # ── TF smoothing ─────────────────────────────────────────────
+    # EMA on the published map→odom transform.  1.0 = no smoothing.
+    # With continuous matching (every scan) the per-scan correction
+    # is already small and EMA mostly adds lag — set to 1.0 by
+    # default.  Drop to 0.6–0.8 only if RViz visualisation jitters.
+    tf_smoothing_alpha: 1.0
+
+    # ── Initial map orientation ──────────────────────────────────
+    # Rotate the map frame at startup so the room appears axis-
+    # aligned even if the robot doesn't start facing X.
+    map_initial_heading: 0.0
+
+    # Fine-trim on the TF-resolved laser mounting yaw.
+    # Positive = CCW correction in map view.
+    laser_yaw_trim: 0.0
+
+    # ── Base frame (TF) ──────────────────────────────────────────
+    base_frame: base_link
+
+    # ── Auto-localization (preloaded map mode) ───────────────────
+    # When a saved map is loaded, the SLAM node runs a global search
+    # to find the robot's pose anywhere in the map.  Now uses
+    # multi-hypothesis CSM + ICP refinement + inlier-ratio acceptance
+    # so it can't get fooled by a partial wrong-wall match (score
+    # alone is unreliable for that — the score can be high while the
+    # scan visibly disagrees with the map).
+    #
+    # The acceptance test is geometric:
+    #   inlier_ratio = #{scan points within  auto_localize_inlier_dist
+    #                    of any occupied wall cell}  /  N_scan_points
+    # A real match lands ≥ ~85% at 12 cm; we accept at 65%.
+    auto_localize:                       true
+    auto_localize_xy_step:               0.30   # m (stage-1 grid step)
+    auto_localize_th_step_deg:           8.0
+    # Number of spatially-distinct CSM maxima refined per attempt.
+    # Higher = more chances to catch the right pose when the global
+    # argmax is a wrong-wall lookalike.  5 is a sweet spot — covers
+    # the room's 4 rotational symmetries plus one tie-breaker.
+    auto_localize_top_k:                 5
+    # Geometric quality gate:
+    auto_localize_min_inlier_ratio:      0.65   # 65 % of scan points
+    auto_localize_inlier_dist:           0.12   # within 12 cm of a wall
+    # Best-of-N fallback (only fires when max_tries > 0):
+    auto_localize_fallback_min_inlier:   0.50
+    # 0 = never give up.  Use /relocalize or /initialpose to abort.
+    auto_localize_max_tries:             0
+    auto_localize_retry_period:          2.0    # seconds between attempts
+    # Legacy score-based gate (kept as a diagnostic, no longer the
+    # primary acceptance test).
+    auto_localize_min_score:             180.0
+
+    # ── Runtime localization quality monitor ──────────────────────
+    # In NAVIGATION mode, after every accepted match we sample the
+    # inlier ratio against the local cached map cloud.  When the
+    # rolling mean of the last N samples falls below the rearm
+    # threshold, we automatically re-arm the global localizer — no
+    # button press needed.  Hysteresis: acceptance threshold above
+    # (65 %) is well separated from the re-arm threshold (40 %) to
+    # avoid bouncing.
+    loc_quality_check_enabled:           true
+    loc_rearm_threshold:                 0.40
+    loc_rearm_window:                    20      # ≈ 2 s @ 10 Hz
+    loc_rearm_cooldown_scans:            30      # block re-arm right after a snap

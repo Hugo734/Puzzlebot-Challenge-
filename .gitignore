@@ -6,5 +6,6 @@ odom_square/
 docs/
 .dockerignore
 FULL_INSTRUCTIONS.md
-CLAUDE.md
+.claude/memory/
 *.pyc
+actions-runner/

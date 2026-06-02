@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AMR Warehouse Robot Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+</head>
+<body>
+
+  <header class="header">
+    <div class="header-brand">
+      <span class="header-icon">&#9651;</span>
+      <div>
+        <h1 class="header-title">AMR Warehouse Robot</h1>
+        <p class="header-sub">Autonomous Mobile Robot — Puzzlebot AMR</p>
+      </div>
+    </div>
+    <div class="header-status">
+      <div class="mode-switch" id="modeSwitch" title="Switch system mode">
+        <button class="mode-btn" data-mode="MAPPING" id="modeBtnMapping">MAP</button>
+        <button class="mode-btn active" data-mode="NAVIGATION" id="modeBtnNav">NAV</button>
+      </div>
+      <button class="map-btn save-map-btn hidden" id="btnSaveMap" title="Save current SLAM map to disk">
+        &#128190; Save Map
+      </button>
+      <button class="map-btn" id="btnFitWorkspace" title="Auto-fit the known room rectangle to the detected walls and lock it as the workspace boundary">
+        &#128208; Fit Workspace
+      </button>
+      <span class="conn-dot" id="connDot"></span>
+      <span class="conn-label" id="connLabel">Connecting…</span>
+    </div>
+  </header>
+
+  <!-- ================================================================
+       MAP RESET CONFIRM DIALOG (NAV → MAP)
+       ================================================================ -->
+  <div id="mapResetDialog" class="wp-popup hidden">
+    <div class="wp-popup-box">
+      <h3 class="wp-popup-title">Switch to Mapping</h3>
+      <p style="margin:0 0 14px 0">
+        Switching to MAPPING mode lets SLAM update the occupancy grid.
+        How do you want to start?
+      </p>
+      <div class="wp-popup-actions" style="flex-direction:column;gap:8px">
+        <button class="btn-submit" id="btnModeContinueMap">
+          Continue from current map
+        </button>
+        <button class="btn-cancel" id="btnModeResetMap">
+          Start from empty grid
+        </button>
+        <button class="btn-cancel" id="btnModeCancelSwitch" style="opacity:0.6">
+          Cancel
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <main class="grid">
+
+    <!-- ================================================================
+         MAP PANEL — fills all remaining space
+         ================================================================ -->
+    <section class="panel-map">
+      <div class="map-container" id="mapContainer">
+
+        <!-- Single canvas: map bg + all overlays -->
+        <canvas id="mapCanvas" class="map-canvas"></canvas>
+
+        <!-- Toolbar overlay (top-left) -->
+        <div class="map-toolbar">
+          <button class="map-btn" id="btnEditWaypoints" title="Toggle waypoint placement mode">
+            &#9998; Edit Waypoints
+          </button>
+          <span class="map-edit-hint hidden" id="editHint">
+            Drag to add &nbsp;·&nbsp; Click waypoint to delete &nbsp;·&nbsp; ESC to exit
+          </span>
+          <span class="map-source-badge static hidden" id="mapSourceBadge">STATIC</span>
+        </div>
+
+        <!-- Legend overlay (bottom-left) -->
+        <div class="map-legend">
+          <div class="legend-item">
+            <span class="legend-dot" style="background:#00ff88;box-shadow:0 0 4px #00ff88"></span>Robot
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background:#ff6600"></span>Path
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background:rgba(255,60,60,0.9)"></span>LiDAR
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background:#ffd166"></span>Truck
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background:#00c8ff"></span>Rack
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background:#66ee88"></span>Roller
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ================================================================
+         RIGHT PANEL — controls
+         ================================================================ -->
+    <aside class="panel-right">
+
+      <!-- State + Mission (always visible) -->
+      <section class="card">
+        <h2 class="card-title">Robot State</h2>
+        <div class="state-badge" id="stateBadge">UNKNOWN</div>
+        <div id="missionBox" class="mission-box" style="margin-top:10px">
+          <p class="dim">No active mission</p>
+        </div>
+      </section>
+
+      <!-- Tab bar -->
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="navigate">NAV</button>
+        <button class="tab-btn" data-tab="mission">MISSION</button>
+        <button class="tab-btn" data-tab="teleop">TELEOP</button>
+        <button class="tab-btn" data-tab="camera">CAM</button>
+        <button class="tab-btn" data-tab="voice">VOICE</button>
+      </div>
+
+      <!-- ---- TAB: NAVIGATE ---- -->
+      <div class="tab-pane" id="tab-navigate">
+
+        <section class="card">
+          <h2 class="card-title">Navigation Control</h2>
+          <div class="nav-form">
+            <label class="form-label" for="waypointSelect">Waypoint</label>
+            <select id="waypointSelect" class="form-select">
+              <option value="">— loading… —</option>
+            </select>
+            <div style="display:flex;gap:6px">
+              <button class="btn-submit" id="btnGoWaypoint" type="button" style="flex:1">&#9654; Go</button>
+              <button class="btn-cancel" id="btnCancelNav" type="button" style="flex:1">&#9632; Cancel</button>
+            </div>
+          </div>
+          <div class="nav-status-box">
+            <span class="tele-label">Status:</span>
+            <span class="nav-status-badge" id="navStatusBadge">UNKNOWN</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Pose</h2>
+          <div class="tele-grid">
+            <span class="tele-label">X</span>
+            <span class="tele-val mono" id="poseX">0.000 m</span>
+            <span class="tele-label">Y</span>
+            <span class="tele-val mono" id="poseY">0.000 m</span>
+            <span class="tele-label">&theta;</span>
+            <span class="tele-val mono" id="poseTheta">0.0000 rad</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Velocity</h2>
+          <div class="vel-row">
+            <span class="tele-label">Linear</span>
+            <div class="vel-bar-wrap"><div class="vel-bar vel-bar-linear" id="barLinear"></div></div>
+            <span class="tele-val mono" id="velLinear">0.000 m/s</span>
+          </div>
+          <div class="vel-row">
+            <span class="tele-label">Angular</span>
+            <div class="vel-bar-wrap"><div class="vel-bar vel-bar-angular" id="barAngular"></div></div>
+            <span class="tele-val mono" id="velAngular">0.000 rad/s</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Lifter Level</h2>
+          <div class="lifter-wrap">
+            <div class="lifter-column" id="lifterColumn"></div>
+            <div class="lifter-labels">
+              <span>7</span><span>6</span><span>5</span><span>4</span>
+              <span>3</span><span>2</span><span>1</span><span>0</span>
+            </div>
+          </div>
+          <p class="lifter-text">Level: <span class="mono accent" id="lifterText">0</span></p>
+        </section>
+
+      </div><!-- /tab-navigate -->
+
+      <!-- ---- TAB: MISSION ---- -->
+      <div class="tab-pane hidden" id="tab-mission">
+
+        <section class="card">
+          <h2 class="card-title">Send Mission</h2>
+          <form id="missionForm" class="mission-form" autocomplete="off">
+
+            <label class="form-label" for="palletId">Pallet ID</label>
+            <input id="palletId" class="form-input" type="text" placeholder="e.g. P001" required />
+
+            <label class="form-label" for="sourceSelect">Source</label>
+            <select id="sourceSelect" class="form-select" required>
+              <option value="">— select source —</option>
+              <optgroup label="Trucks">
+                <option value="truck_1">Truck 1</option>
+                <option value="truck_2">Truck 2</option>
+                <option value="truck_3">Truck 3</option>
+              </optgroup>
+              <optgroup label="Racks">
+                <option value="rack_1">Rack 1</option>
+                <option value="rack_2">Rack 2</option>
+              </optgroup>
+              <optgroup label="Rollers">
+                <option value="roller_1">Roller 1</option>
+                <option value="roller_2">Roller 2</option>
+              </optgroup>
+            </select>
+
+            <label class="form-label" for="sourceLevelSelect">Level</label>
+            <select id="sourceLevelSelect" class="form-select" required>
+              <option value="">— select level —</option>
+              <option value="1">1 — Floor</option>
+              <option value="2">2 — Rack level 2</option>
+              <option value="3">3 — Truck</option>
+            </select>
+
+            <label class="form-label" for="destSelect">Destination</label>
+            <select id="destSelect" class="form-select" required>
+              <option value="">— select destination —</option>
+              <optgroup label="Trucks">
+                <option value="truck_1">Truck 1</option>
+                <option value="truck_2">Truck 2</option>
+                <option value="truck_3">Truck 3</option>
+              </optgroup>
+              <optgroup label="Racks">
+                <option value="rack_1">Rack 1</option>
+                <option value="rack_2">Rack 2</option>
+              </optgroup>
+              <optgroup label="Rollers">
+                <option value="roller_1">Roller 1</option>
+                <option value="roller_2">Roller 2</option>
+              </optgroup>
+            </select>
+
+            <button class="btn-submit" type="submit">&#9654; Send Mission</button>
+          </form>
+          <div id="toast" class="toast hidden"></div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Mission History</h2>
+          <ul class="history-list" id="historyList">
+            <li class="dim">No missions sent yet</li>
+          </ul>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Session Stats</h2>
+          <div class="tele-grid">
+            <span class="tele-label">Missions sent</span>
+            <span class="tele-val mono accent" id="statMissions">0</span>
+            <span class="tele-label">Uptime</span>
+            <span class="tele-val mono" id="statUptime">00:00:00</span>
+            <span class="tele-label">WS events</span>
+            <span class="tele-val mono" id="statEvents">0</span>
+          </div>
+        </section>
+
+      </div><!-- /tab-mission -->
+
+      <!-- ---- TAB: TELEOP ---- -->
+      <div class="tab-pane hidden" id="tab-teleop">
+
+        <section class="card">
+          <h2 class="card-title">Teleop Manual</h2>
+          <div class="teleop-keys">
+            <div class="key-row">
+              <div class="key-spacer"></div>
+              <div class="key" id="keyW">W</div>
+              <div class="key-spacer"></div>
+            </div>
+            <div class="key-row">
+              <div class="key" id="keyA">A</div>
+              <div class="key" id="keyS">S</div>
+              <div class="key" id="keyD">D</div>
+            </div>
+          </div>
+          <div style="margin:10px 0">
+            <div class="vel-row">
+              <span class="tele-label">Linear</span>
+              <div class="vel-bar-wrap bipolar-wrap">
+                <div class="bipolar-center"></div>
+                <div class="vel-bar vel-bar-linear bipolar-wrap-bar" id="tBarLinear" style="width:0%;left:50%"></div>
+              </div>
+              <span class="tele-val mono" id="tVelLinear">0.00</span>
+            </div>
+            <div class="vel-row">
+              <span class="tele-label">Angular</span>
+              <div class="vel-bar-wrap bipolar-wrap">
+                <div class="bipolar-center"></div>
+                <div class="vel-bar vel-bar-angular bipolar-wrap-bar" id="tBarAngular" style="width:0%;left:50%"></div>
+              </div>
+              <span class="tele-val mono" id="tVelAngular">0.00</span>
+            </div>
+          </div>
+          <button class="btn-estop" id="btnEstop" type="button">&#9632; E-STOP</button>
+          <p class="teleop-hint">WASD / Arrow Keys &nbsp;&middot;&nbsp; Space = E-Stop</p>
+        </section>
+
+      </div><!-- /tab-teleop -->
+
+      <!-- ---- TAB: CAMERA ---- -->
+      <div class="tab-pane hidden" id="tab-camera">
+
+        <section class="card">
+          <h2 class="card-title">Live Camera Feed</h2>
+          <div class="feed-wrap">
+            <img
+              id="cameraFeed"
+              class="feed-img"
+              src="/video_feed"
+              alt="Live camera feed"
+              onerror="this.src='/video_feed'"
+            />
+          </div>
+        </section>
+
+      </div><!-- /tab-camera -->
+
+      <!-- ---- TAB: VOICE ---- -->
+      <div class="tab-pane hidden" id="tab-voice">
+
+        <section class="card">
+          <h2 class="card-title">Voice Commands</h2>
+
+          <div class="voice-btn-row">
+            <button class="btn-voice-record" id="btnVoiceRecord" type="button">
+              &#9679; Hold to Record
+            </button>
+          </div>
+
+          <div class="voice-status-row">
+            <span class="tele-label">Status</span>
+            <span class="voice-status" id="voiceStatus">Ready</span>
+          </div>
+
+          <div class="voice-result-box" id="voiceResultBox">
+            <span class="voice-result-label">Last word:</span>
+            <span class="voice-result-word mono accent" id="voiceResultWord">—</span>
+          </div>
+
+          <p class="teleop-hint" id="voiceModelStatus">Checking models…</p>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Voice History</h2>
+          <ul class="history-list" id="voiceHistoryList">
+            <li class="dim">No commands yet</li>
+          </ul>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Vocabulary</h2>
+          <div class="voice-vocab" id="voiceVocab">
+            <span class="dim">Loading…</span>
+          </div>
+        </section>
+
+      </div><!-- /tab-voice -->
+
+    </aside>
+  </main>
+
+  <!-- ================================================================
+       WAYPOINT PLACEMENT POPUP
+       ================================================================ -->
+  <div id="waypointPopup" class="wp-popup hidden">
+    <div class="wp-popup-box">
+      <h3 class="wp-popup-title">&#9998; Place Waypoint</h3>
+      <p class="wp-popup-coords" id="wpCoords">x: 0.000 m, y: 0.000 m</p>
+      <p class="wp-popup-coords" id="wpHeading">&theta;: 0.000 rad (0.0°)</p>
+
+      <label class="form-label">Name</label>
+      <input id="wpName" class="form-input" type="text" placeholder="e.g. truck_1, rack_2…" autocomplete="off" />
+
+      <div class="wp-popup-actions">
+        <button class="btn-submit" id="btnSaveWaypoint">&#10003; Save</button>
+        <button class="btn-cancel" id="btnCancelWaypoint">&#10007; Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       FOOTER
+       ================================================================ -->
+  <footer class="footer">
+    <span>Puzzlebot AMR &mdash; TE3003B FJ2026 &mdash; ITESM</span>
+    <span>
+      <span class="conn-dot" id="footerDot"></span>
+      <span id="footerLabel">Connecting…</span>
+    </span>
+  </footer>
+
+  <script src="/static/main.js"></script>
+</body>
+</html>
