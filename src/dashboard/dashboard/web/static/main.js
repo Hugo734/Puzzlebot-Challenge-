@@ -853,34 +853,24 @@ function updateTeleopBars(linear, angular) {
 }
 
 // ---------------------------------------------------------------------------
-// System mode (MAPPING ⇄ NAVIGATION) + Save Map
+// Unified SLAM mode: mapping + localisation run together.  No mode switch.
+// We keep the helpers for backwards compat (server-side /api/mode still
+// works) but the dashboard no longer exposes a UI to toggle.
 // ---------------------------------------------------------------------------
 
 let _systemMode = 'NAVIGATION';
 
 function applyModeToUI(mode) {
-  _systemMode = mode;
-
-  // Highlight the active button
-  document.querySelectorAll('.mode-switch .mode-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.mode === mode);
+  _systemMode = mode || 'NAVIGATION';
+  // Always enable navigation controls — there is no separate mapping
+  // mode that blocks them anymore.
+  ['btnGoWaypoint', 'btnCancelNav', 'waypointSelect'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.disabled = false; el.title = ''; }
   });
-
-  // Save Map button only relevant during mapping
+  // Save Map is always available too (map is always being built).
   const saveBtn = document.getElementById('btnSaveMap');
-  if (saveBtn) saveBtn.classList.toggle('hidden', mode !== 'MAPPING');
-
-  // Disable nav controls in mapping mode
-  const navGo = document.getElementById('btnGoWaypoint');
-  const navCancel = document.getElementById('btnCancelNav');
-  const navSel = document.getElementById('waypointSelect');
-  [navGo, navCancel, navSel].forEach(el => {
-    if (!el) return;
-    el.disabled = (mode !== 'NAVIGATION');
-    el.title = (mode !== 'NAVIGATION')
-      ? 'Switch to NAV mode to send navigation goals'
-      : '';
-  });
+  if (saveBtn) saveBtn.classList.remove('hidden');
 }
 
 async function fetchCurrentMode() {
@@ -891,61 +881,10 @@ async function fetchCurrentMode() {
   } catch (e) { /* ignore */ }
 }
 
-async function requestModeSwitch(target, options = {}) {
-  try {
-    const res  = await fetch('/api/mode', {
-      method:  'POST',
-      headers: {'Content-Type': 'application/json'},
-      body:    JSON.stringify({mode: target, ...options}),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast(data.error || 'Mode switch failed', 'error');
-      return false;
-    }
-    applyModeToUI(data.mode);
-    showToast(`Mode: ${data.mode}`, 'success');
-    return true;
-  } catch (err) {
-    showToast(`Mode switch error: ${err}`, 'error');
-    return false;
-  }
-}
-
 function initSystemMode() {
-  // Fetch the current mode from the backend on startup
+  // Unified mode: just enable everything and fetch once for compat.
+  applyModeToUI('NAVIGATION');
   fetchCurrentMode();
-
-  // Map / Nav toggle
-  document.querySelectorAll('.mode-switch .mode-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const target = btn.dataset.mode;
-      if (target === _systemMode) return;
-
-      if (_systemMode === 'NAVIGATION' && target === 'MAPPING') {
-        // Ask whether to continue existing map or start fresh
-        const dlg = document.getElementById('mapResetDialog');
-        if (dlg) dlg.classList.remove('hidden');
-        return;
-      }
-
-      // MAPPING → NAVIGATION (auto-save happens server-side)
-      requestModeSwitch(target);
-    });
-  });
-
-  // Dialog buttons (NAV → MAP)
-  document.getElementById('btnModeContinueMap')?.addEventListener('click', () => {
-    document.getElementById('mapResetDialog')?.classList.add('hidden');
-    requestModeSwitch('MAPPING', {reset_map: false});
-  });
-  document.getElementById('btnModeResetMap')?.addEventListener('click', () => {
-    document.getElementById('mapResetDialog')?.classList.add('hidden');
-    requestModeSwitch('MAPPING', {reset_map: true});
-  });
-  document.getElementById('btnModeCancelSwitch')?.addEventListener('click', () => {
-    document.getElementById('mapResetDialog')?.classList.add('hidden');
-  });
 
   // Save Map button
   document.getElementById('btnSaveMap')?.addEventListener('click', async () => {
@@ -966,24 +905,6 @@ function initSystemMode() {
     }
   });
 
-  // Fit Workspace button — auto-detect & lock the room rectangle
-  document.getElementById('btnFitWorkspace')?.addEventListener('click', async () => {
-    const btn = document.getElementById('btnFitWorkspace');
-    btn.classList.add('saving');
-    try {
-      const res  = await fetch('/api/slam/fit_workspace', {method: 'POST'});
-      const data = await res.json();
-      if (res.ok && data.success) {
-        showToast(data.message || 'Workspace locked', 'success');
-      } else {
-        showToast(`Fit failed: ${data.message || 'unknown error'}`, 'error');
-      }
-    } catch (err) {
-      showToast(`Fit error: ${err}`, 'error');
-    } finally {
-      btn.classList.remove('saving');
-    }
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,55 +923,13 @@ document.addEventListener('DOMContentLoaded', () => {
   initWaypointPopup();
   initVoice();
   initSystemMode();
+  initSmDebugPanel();
 
   // Preload map and fetch metadata immediately
   _mapImg.src = '/api/map';
   loadMapInfo();
 
-  const form = document.getElementById('missionForm');
-  if (!form) return;
-
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-
-    const palletId    = document.getElementById('palletId').value.trim();
-    const source      = document.getElementById('sourceSelect').value;
-    const sourceLevel = parseInt(document.getElementById('sourceLevelSelect').value, 10);
-    const destination = document.getElementById('destSelect').value;
-
-    if (!palletId || !source || !sourceLevel || !destination) {
-      showToast('Please fill in all fields.', 'error'); return;
-    }
-    if (source === destination) {
-      showToast('Source and destination must be different.', 'error'); return;
-    }
-
-    const btn = form.querySelector('.btn-submit');
-    btn.disabled = true;
-
-    try {
-      const res  = await fetch('/api/mission', {
-        method:  'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({pallet_id: palletId, source, source_level: sourceLevel, destination}),
-      });
-      const json = await res.json();
-
-      if (!res.ok || json.error) {
-        showToast(`Error: ${json.error || 'Unknown error'}`, 'error'); return;
-      }
-
-      showToast(`Mission sent: ${palletId} → ${formatLocation(destination)}`, 'success');
-      addHistoryItem(json.mission);
-      _missionCount++;
-      setText('statMissions', String(_missionCount));
-      form.reset();
-    } catch (err) {
-      showToast(`Network error: ${err.message}`, 'error');
-    } finally {
-      btn.disabled = false;
-    }
-  });
+  initMissionBuilder();
 });
 
 // ---------------------------------------------------------------------------
@@ -1064,9 +943,23 @@ function addHistoryItem(mission) {
 
   const li = document.createElement('li');
   li.className = 'history-item';
+
+  let meta = '';
+  if (mission.type === 'CUSTOM') {
+    const src = mission.source?.waypoint || '?';
+    const dest = (typeof mission.destination === 'string')
+      ? mission.destination
+      : (mission.destination?.waypoint || '?');
+    meta = `${src} → ${dest}`;
+  } else {
+    const cands = mission.source?.candidates;
+    meta = (cands && cands.length) ? cands.join(',') : 'all';
+    meta += ' → (QR)';
+  }
+
   li.innerHTML =
-    `<span class="hist-id">${mission.pallet_id}</span>` +
-    `<span class="hist-meta"> · ${formatLocation(mission.source)} (L${mission.source_level}) → ${formatLocation(mission.destination)}</span>`;
+    `<span class="hist-id">${mission.id || '—'}</span>` +
+    `<span class="hist-meta"> · ${mission.type} · ${meta}</span>`;
   list.insertBefore(li, list.firstChild);
   while (list.children.length > MAX_HISTORY) list.removeChild(list.lastChild);
 }
@@ -1276,4 +1169,298 @@ function _setVoiceStatus(cls, text) {
   if (!el) return;
   el.className  = 'voice-status' + (cls ? ' ' + cls : '');
   el.innerHTML  = text;
+}
+
+// ---------------------------------------------------------------------------
+// State machine debug panel
+// ---------------------------------------------------------------------------
+
+let _smOutcomes = {};       // {state_name: [outcome, ...]}
+let _smLastState = null;
+const _SM_LOG_MAX = 20;
+
+async function initSmDebugPanel() {
+  // Load per-state outcomes map for the Force-outcome dropdown.
+  try {
+    const res = await fetch('/api/sm/outcomes');
+    _smOutcomes = await res.json();
+  } catch (err) {
+    console.warn('Could not load /api/sm/outcomes:', err);
+    _smOutcomes = {};
+  }
+
+  // Initial snapshot pull (in case the server emitted before this tab existed).
+  try {
+    const res = await fetch('/api/sm/snapshot');
+    const data = await res.json();
+    if (data.snapshot) _renderSmSnapshot(data.snapshot);
+    if (Array.isArray(data.transitions)) {
+      data.transitions.forEach(_appendSmTransition);
+    }
+  } catch (err) { /* ignored — socket will catch up */ }
+
+  document.getElementById('smBtnPause').addEventListener('click',
+    () => _smControl({action: 'pause'}));
+  document.getElementById('smBtnResume').addEventListener('click',
+    () => _smControl({action: 'resume'}));
+  document.getElementById('smBtnStep').addEventListener('click',
+    () => _smControl({action: 'step'}));
+  document.getElementById('smBtnAbort').addEventListener('click', () => {
+    if (!confirm('Abort the current mission?')) return;
+    _smControl({action: 'abort'});
+  });
+  document.getElementById('smStepModeToggle').addEventListener('change', (ev) => {
+    _smControl({action: 'set_step_mode', value: ev.target.checked});
+  });
+  document.getElementById('smBtnForce').addEventListener('click', () => {
+    const sel = document.getElementById('smForceSelect');
+    const value = sel.value;
+    if (!value) return;
+    _smControl({action: 'force_outcome', value});
+    sel.value = '';
+  });
+}
+
+async function _smControl(payload) {
+  try {
+    await fetch('/api/sm/control', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    console.warn('sm/control failed:', err);
+  }
+}
+
+function _renderSmSnapshot(snap) {
+  if (!snap) return;
+  setText('smCurrentState',     snap.state || '—');
+  setText('smMissionId',        snap.mission_id || '—');
+  setText('smMissionType',      snap.mission_type || '—');
+  setText('smCurrentCandidate', snap.current_candidate || '—');
+  setText('smQrValue',          snap.qr_value || snap.qr_detected || '—');
+  setText('smResolvedDest',     snap.resolved_dest || '—');
+  setText('smCandidateQueue',
+    Array.isArray(snap.candidate_queue) && snap.candidate_queue.length
+      ? snap.candidate_queue.join(' → ')
+      : '—');
+
+  // Repopulate the force-outcome dropdown when the state changes.
+  if (snap.state !== _smLastState) {
+    _smLastState = snap.state;
+    const sel = document.getElementById('smForceSelect');
+    if (sel) {
+      const outs = _smOutcomes[snap.state] || [];
+      sel.innerHTML = '<option value="">— select —</option>'
+        + outs.map(o => `<option value="${o}">${o}</option>`).join('');
+    }
+  }
+
+  // Debug flags — waiting hint + step-mode toggle echo.
+  const dbg = snap.debug || {};
+  const toggle = document.getElementById('smStepModeToggle');
+  if (toggle && toggle.checked !== !!dbg.step_mode) toggle.checked = !!dbg.step_mode;
+  const hint = document.getElementById('smWaitingHint');
+  if (hint) {
+    if (dbg.waiting_state) {
+      hint.textContent = `⏸ Waiting for step at ${dbg.waiting_state}…`;
+    } else if (dbg.pause) {
+      hint.textContent = '⏸ Paused';
+    } else if (dbg.abort) {
+      hint.textContent = '⛔ Aborted — clear with /sm/control {action:"clear_abort"}';
+    } else {
+      hint.textContent = '';
+    }
+  }
+
+  const pre = document.getElementById('smBlackboardJson');
+  if (pre) pre.textContent = JSON.stringify(snap, null, 2);
+}
+
+function _appendSmTransition(tr) {
+  const list = document.getElementById('smTransitionLog');
+  if (!list || !tr) return;
+  // Clear the "no transitions" placeholder once we have data.
+  if (list.firstElementChild && list.firstElementChild.classList.contains('dim')) {
+    list.innerHTML = '';
+  }
+  const li = document.createElement('li');
+  const ts = (typeof tr.t === 'number') ? tr.t.toFixed(2) : '—';
+  li.innerHTML = `<span class="mono dim">${ts}</span> `
+    + `<span class="mono">${tr.state}</span> `
+    + `<span class="accent">→ ${tr.outcome}</span>`;
+  list.insertBefore(li, list.firstChild);
+  while (list.children.length > _SM_LOG_MAX) {
+    list.removeChild(list.lastChild);
+  }
+}
+
+socket.on('sm_snapshot', _renderSmSnapshot);
+socket.on('sm_transition', _appendSmTransition);
+socket.on('sm_transition_bulk', (arr) => {
+  if (!Array.isArray(arr)) return;
+  arr.forEach(_appendSmTransition);
+});
+
+// ---------------------------------------------------------------------------
+// Mission builder (3 mission types — ROLLER_TO_TRUCK / RACK_TO_TRUCK / CUSTOM)
+// ---------------------------------------------------------------------------
+
+let _zones = {zones: {}, qr_aliases: {}};
+
+async function initMissionBuilder() {
+  const form = document.getElementById('missionForm');
+  if (!form) return;
+
+  try {
+    const res = await fetch('/api/sm/zones');
+    _zones = await res.json();
+  } catch (err) {
+    console.warn('Could not load /api/sm/zones:', err);
+  }
+
+  const typeSel = document.getElementById('missionType');
+  typeSel.addEventListener('change', _renderMissionForm);
+  document.getElementById('customScanQr').addEventListener('change', _updateMissionPreview);
+  document.getElementById('customSource').addEventListener('change', _updateMissionPreview);
+  document.getElementById('customDest').addEventListener('change', _updateMissionPreview);
+  document.getElementById('customSkipAlign').addEventListener('change', _updateMissionPreview);
+  document.getElementById('missionIdInput').addEventListener('input', _updateMissionPreview);
+  document.getElementById('pickupLevel').addEventListener('input', _updateMissionPreview);
+  document.getElementById('placeLevel').addEventListener('input', _updateMissionPreview);
+
+  _renderMissionForm();
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const mission = _buildMissionJson();
+    if (!mission) return;
+
+    const btn = form.querySelector('.btn-submit');
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/mission', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(mission),
+      });
+      const json = await res.json();
+      if (!res.ok || json.error) {
+        showToast(`Error: ${json.error || 'Unknown error'}`, 'error');
+        return;
+      }
+      showToast(`Mission sent: ${mission.type}`, 'success');
+      addHistoryItem(json.mission);
+      _missionCount++;
+      setText('statMissions', String(_missionCount));
+    } catch (err) {
+      showToast(`Network error: ${err.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function _renderMissionForm() {
+  const type = document.getElementById('missionType').value;
+  const searchSec = document.getElementById('missionSearchSection');
+  const customSec = document.getElementById('missionCustomSection');
+  const pickupInput = document.getElementById('pickupLevel');
+
+  if (type === 'CUSTOM') {
+    searchSec.classList.add('hidden');
+    customSec.classList.remove('hidden');
+    _populateCustomDropdowns();
+  } else {
+    customSec.classList.add('hidden');
+    searchSec.classList.remove('hidden');
+    _populateCandidateList(type);
+  }
+
+  // Sensible default pickup levels per type.
+  if (type === 'ROLLER_TO_TRUCK') pickupInput.value = '1';
+  else if (type === 'RACK_TO_TRUCK') pickupInput.value = '3';
+
+  _updateMissionPreview();
+}
+
+function _populateCandidateList(type) {
+  const list = document.getElementById('candidateList');
+  list.innerHTML = '';
+  const zones = _zones.zones || {};
+  let pool = [];
+  if (type === 'ROLLER_TO_TRUCK') {
+    pool = zones.rollers || [];
+  } else if (type === 'RACK_TO_TRUCK') {
+    pool = (zones.racks_l1 || []).concat(zones.racks_l2 || []);
+  }
+  if (pool.length === 0) {
+    list.innerHTML = '<span class="dim">No zones defined</span>';
+    return;
+  }
+  pool.forEach(name => {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = name;
+    cb.addEventListener('change', _updateMissionPreview);
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(name));
+    list.appendChild(label);
+  });
+}
+
+function _populateCustomDropdowns() {
+  const all = [];
+  Object.values(_zones.zones || {}).forEach(arr => all.push(...arr));
+  const srcSel = document.getElementById('customSource');
+  const destSel = document.getElementById('customDest');
+  srcSel.innerHTML = all.map(n => `<option value="${n}">${n}</option>`).join('');
+  destSel.innerHTML = '<option value="auto_from_qr">(auto from QR)</option>'
+    + all.map(n => `<option value="${n}">${n}</option>`).join('');
+}
+
+function _buildMissionJson() {
+  const type = document.getElementById('missionType').value;
+  const idVal = document.getElementById('missionIdInput').value.trim();
+  const pickup = parseInt(document.getElementById('pickupLevel').value, 10);
+  const place = parseInt(document.getElementById('placeLevel').value, 10);
+
+  if (Number.isNaN(pickup) || pickup < 0 || pickup > 7) {
+    showToast('Pickup level must be 0–7', 'error'); return null;
+  }
+  if (Number.isNaN(place) || place < 0 || place > 7) {
+    showToast('Place level must be 0–7', 'error'); return null;
+  }
+
+  const base = {type, pickup_level: pickup, place_level: place};
+  if (idVal) base.id = idVal;
+
+  if (type === 'CUSTOM') {
+    const src = document.getElementById('customSource').value;
+    const dest = document.getElementById('customDest').value;
+    const scan = document.getElementById('customScanQr').checked;
+    const skip = document.getElementById('customSkipAlign').checked;
+    if (!src) { showToast('Pick a source waypoint', 'error'); return null; }
+    base.source = {waypoint: src, scan_qr: scan};
+    base.destination = (dest === 'auto_from_qr') ? 'auto_from_qr' : {waypoint: dest};
+    if (skip) base.skip_alignment = true;
+    return base;
+  }
+
+  // Search-type missions.
+  const checked = Array.from(
+    document.querySelectorAll('#candidateList input:checked')
+  ).map(cb => cb.value);
+  base.source = checked.length ? {candidates: checked} : {};
+  base.destination = 'auto_from_qr';
+  return base;
+}
+
+function _updateMissionPreview() {
+  const pre = document.getElementById('missionPreview');
+  if (!pre) return;
+  const mission = _buildMissionJson();
+  pre.textContent = mission ? JSON.stringify(mission, null, 2) : '';
 }

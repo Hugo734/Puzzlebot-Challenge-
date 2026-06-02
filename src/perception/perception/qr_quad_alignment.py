@@ -243,6 +243,10 @@ class QRQuadAlignmentNode(Node):
         self._pub_state = self.create_publisher(String, '/alignment_state', 10)
         self._pub_qr = self.create_publisher(PoseArray, '/qr_poses', 10)
         self._pub_goal = self.create_publisher(Point, '/path_debug/goal', 10)
+        # Mission control's SCAN_QR state subscribes here to learn which
+        # pallet the robot is in front of. Only payloads that decoded
+        # successfully are published (empty strings are dropped).
+        self._pub_qr_id = self.create_publisher(String, '/qr_detected', 10)
 
         # ---- Odometria ----
         self._odom = OdometryTracker(
@@ -320,6 +324,15 @@ class QRQuadAlignmentNode(Node):
         pa.header.frame_id = self._frame_id
         pa.poses = [d['pose'] for d in dets]
         self._pub_qr.publish(pa)
+
+        # Publish the decoded payload of the closest QR (smallest tvec.z)
+        # so the SM can identify which pallet is in front.
+        decoded = [d for d in dets if d.get('id')]
+        if decoded:
+            closest = min(decoded, key=lambda d: float(d['tvec'][2]))
+            id_msg = String()
+            id_msg.data = str(closest['id'])
+            self._pub_qr_id.publish(id_msg)
 
         if dets:
             d = dets[0]

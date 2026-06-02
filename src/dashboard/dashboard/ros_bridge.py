@@ -5,6 +5,7 @@ Subscriptions run in the ROS2 executor thread.
 Flask reads data via thread-safe locks.
 """
 
+import collections
 import io
 import json
 import os
@@ -19,11 +20,15 @@ from rclpy.qos import (
     QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy,
 )
 
+# Number of recent SM transitions kept for the dashboard log.
+SM_TRANSITION_BUFFER = 20
+
 
 @dataclass
 class RobotState:
     pose: dict = field(default_factory=lambda: {"x": 0.0, "y": 0.0, "theta": 0.0})
-    state: str = "UNKNOWN"
+    state: str = "UNKNOWN"             # mission_control SM state (was /robot_state)
+    nav_status: str = "IDLE"           # nav_node status (was state, kept separate now)
     mission: Optional[dict] = None
     velocity: dict = field(default_factory=lambda: {"linear": 0.0, "angular": 0.0})
     lifter_level: int = 0
@@ -48,6 +53,11 @@ class RosBridge:
         self._latest_map: Optional[bytes] = None    # PNG bytes
         self._map_info: dict = {}                   # origin, resolution, size, source
         self._waypoints: dict = {}
+        # mission_control debug surface
+        self._sm_snapshot: Optional[dict] = None
+        self._sm_transitions: collections.deque = collections.deque(
+            maxlen=SM_TRANSITION_BUFFER,
+        )
 
         best_effort_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -70,7 +80,16 @@ class RosBridge:
             PoseStamped, "/slam_pose", self._cb_pose, best_effort_qos
         )
         self._node.create_subscription(
-            String, "/nav_status", self._cb_state, reliable_qos
+            String, "/nav_status", self._cb_nav_status, reliable_qos
+        )
+        self._node.create_subscription(
+            String, "/robot_state", self._cb_robot_state, reliable_qos
+        )
+        self._node.create_subscription(
+            String, "/sm/blackboard", self._cb_sm_blackboard, reliable_qos
+        )
+        self._node.create_subscription(
+            String, "/sm/transition", self._cb_sm_transition, reliable_qos
         )
         self._node.create_subscription(
             String, "/mission", self._cb_mission, reliable_qos
@@ -98,6 +117,7 @@ class RosBridge:
         self._goal_pub = self._node.create_publisher(String, "/goal_waypoint", reliable_qos)
         self._cmd_vel_pub = self._node.create_publisher(Twist, "/cmd_vel_in", reliable_qos)
         self._voice_pub = self._node.create_publisher(String, "/voice_command", reliable_qos)
+        self._sm_control_pub = self._node.create_publisher(String, "/sm/control", reliable_qos)
 
         # /system_mode is latched (transient_local) so late subscribers see the
         # current mode immediately.
@@ -120,7 +140,6 @@ class RosBridge:
         from std_srvs.srv import Trigger
         self._save_map_cli   = self._node.create_client(Trigger, '/map_saver/save_map')
         self._reset_map_cli  = self._node.create_client(Trigger, '/slam_node/reset_map')
-        self._fit_ws_cli     = self._node.create_client(Trigger, '/slam_node/auto_fit_workspace')
         self._reload_wps_cli = self._node.create_client(Trigger, '/nav_node/reload_waypoints')
 
         # Load waypoints and static map from file at startup
@@ -208,6 +227,27 @@ class RosBridge:
         msg = String()
         msg.data = word
         self._voice_pub.publish(msg)
+
+    def get_sm_snapshot(self) -> Optional[dict]:
+        with self._lock:
+            return dict(self._sm_snapshot) if self._sm_snapshot is not None else None
+
+    def get_sm_transitions(self) -> list:
+        with self._lock:
+            return list(self._sm_transitions)
+
+    def publish_sm_control(self, payload: dict) -> None:
+        """Send a debugger command to mission_control on /sm/control.
+
+        Expected payloads (see state_machine_node docstring):
+            {"action": "pause"} / "resume" / "step" / "abort" / "clear_abort"
+            {"action": "set_step_mode", "value": true|false}
+            {"action": "force_outcome", "value": "<outcome>"}
+        """
+        from std_msgs.msg import String
+        msg = String()
+        msg.data = json.dumps(payload)
+        self._sm_control_pub.publish(msg)
 
     def publish_cmd_vel(self, linear: float, angular: float) -> None:
         """Publish a Twist command to /cmd_vel."""
@@ -304,9 +344,6 @@ class RosBridge:
     def call_reset_map(self) -> tuple[bool, str]:
         return self._call_trigger(self._reset_map_cli, 'reset_map', timeout=2.0)
 
-    def call_auto_fit_workspace(self) -> tuple[bool, str]:
-        return self._call_trigger(self._fit_ws_cli, 'auto_fit_workspace', timeout=10.0)
-
     def call_reload_waypoints(self) -> tuple[bool, str]:
         return self._call_trigger(self._reload_wps_cli, 'reload_waypoints', timeout=2.0)
 
@@ -336,9 +373,29 @@ class RosBridge:
                 "theta": round(theta, 4),
             }
 
-    def _cb_state(self, msg) -> None:
+    def _cb_nav_status(self, msg) -> None:
+        with self._lock:
+            self._state.nav_status = msg.data
+
+    def _cb_robot_state(self, msg) -> None:
         with self._lock:
             self._state.state = msg.data
+
+    def _cb_sm_blackboard(self, msg) -> None:
+        try:
+            payload = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError):
+            return
+        with self._lock:
+            self._sm_snapshot = payload
+
+    def _cb_sm_transition(self, msg) -> None:
+        try:
+            payload = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError):
+            return
+        with self._lock:
+            self._sm_transitions.append(payload)
 
     def _cb_mission(self, msg) -> None:
         try:

@@ -37,6 +37,9 @@ from rclpy.node import Node
 from rclpy.qos import (QoSProfile, ReliabilityPolicy, DurabilityPolicy,
                         qos_profile_sensor_data)
 
+import tf2_ros
+from rclpy.time import Time as RclpyTime
+
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Path
 from sensor_msgs.msg import LaserScan, PointCloud2, PointField
@@ -103,6 +106,13 @@ class NavNode(Node):
         self.declare_parameter('obstacle_angle_deg',  55.0)   # half-angle of front arc (deg)
         self.declare_parameter('wall_follow_dist',    0.45)   # target wall distance (m)
         self.declare_parameter('heading_tolerance',   0.12)   # rad (~7°)
+        # Robot body frame the scan angles must be expressed in.  The LiDAR
+        # is mounted rotated relative to base_link (0 in sim, π rear-mount on
+        # the real robot — see URDF lidar_yaw).  We resolve base_frame→scan
+        # frame via TF on the first scan and add that yaw to every ray angle,
+        # exactly like slam_node does.  Without it the front-arc, wall-follow
+        # and local costmap point 180° the wrong way on the real robot.
+        self.declare_parameter('base_frame',          'base_link')
 
         # ── Local costmap (rolling LiDAR memory) ──────────────────────
         self.declare_parameter('local_costmap_radius',        2.0)
@@ -214,6 +224,17 @@ class NavNode(Node):
         self._pose_theta: Optional[float] = None
         self._latest_scan: Optional[LaserScan] = None
 
+        # ── LiDAR mounting yaw (base_frame → scan frame) ────────────────
+        # Resolved from TF on the first scan whose frame_id we can look up.
+        # 0.0 until resolved (sim-safe); becomes ~π on the real rear-mounted
+        # RPLidar A1.  Applied to every ray bearing before it is used for
+        # obstacle detection, wall-following and costmap projection.
+        self._base_frame: str = str(self.get_parameter('base_frame').value)
+        self._lidar_yaw: float = 0.0
+        self._lidar_yaw_resolved: bool = False
+        self._tf_buffer = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+
         self._path: List[WorldPt] = []
         self._state: str = _State.IDLE
         self._current_goal_name: str = ''
@@ -315,12 +336,39 @@ class NavNode(Node):
 
     def _scan_cb(self, msg: LaserScan) -> None:
         self._latest_scan = msg
+        self._resolve_lidar_yaw(msg.header.frame_id)
         # Feed the costmap immediately so the next control tick sees fresh data.
         if self._pose_x is not None and self._costmap is not None:
             self._costmap.recenter(self._pose_x, self._pose_y)
             self._costmap.integrate_scan(
-                msg, self._pose_x, self._pose_y, self._pose_theta
+                msg, self._pose_x, self._pose_y, self._pose_theta,
+                lidar_yaw=self._lidar_yaw,
             )
+
+    def _resolve_lidar_yaw(self, scan_frame: str) -> None:
+        """Cache the base_frame→scan_frame yaw from TF (once).
+
+        Mirrors slam_node's resolveLaser: the RPLidar is mounted rotated
+        relative to base_link (0 in sim, π on the real robot).  Every ray
+        bearing is reported in the scan frame, so we add this yaw before
+        treating it as a base_link-relative angle.
+        """
+        if self._lidar_yaw_resolved or not scan_frame:
+            return
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                self._base_frame, scan_frame, RclpyTime())
+        except Exception:
+            return  # TF not available yet — keep yaw=0.0, retry next scan
+        q = tf.transform.rotation
+        siny = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        self._lidar_yaw = math.atan2(siny, cosy)
+        self._lidar_yaw_resolved = True
+        self.get_logger().info(
+            f'LiDAR mount yaw ({self._base_frame}→{scan_frame}): '
+            f'{math.degrees(self._lidar_yaw):.1f}°'
+        )
 
     def _map_cb(self, msg: OccupancyGrid) -> None:
         """Replace the static planning grid with the latest map from SLAM.
@@ -1200,7 +1248,10 @@ class NavNode(Node):
         half_angle = math.radians(self.get_parameter('obstacle_angle_deg').value)
         angle = scan.angle_min
         for r in scan.ranges:
-            if abs(angle) <= half_angle:
+            # Convert the ray bearing from the scan frame to base_link (adds
+            # the LiDAR mount yaw — π on the real rear-mounted A1) so "front"
+            # is genuinely the robot's +X, not the laser's.
+            if abs(self._wrap_angle(angle + self._lidar_yaw)) <= half_angle:
                 if scan.range_min < r < threshold:
                     return True
             angle += scan.angle_increment
@@ -1212,7 +1263,9 @@ class NavNode(Node):
         angle = scan.angle_min
         vals: List[float] = []
         for r in scan.ranges:
-            if abs(angle - target_angle) <= span:
+            # target_angle is base_link-relative; bring the ray bearing into
+            # base_link with the LiDAR mount yaw before comparing.
+            if abs(self._wrap_angle(angle + self._lidar_yaw - target_angle)) <= span:
                 if scan.range_min < r < scan.range_max:
                     vals.append(r)
             angle += scan.angle_increment

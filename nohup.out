@@ -1,6 +1,0 @@
-libEGL warning: Not allowed to force software rendering when API explicitly selects a hardware device.
-libEGL warning: egl: failed to create dri2 screen
-libEGL warning: Not allowed to force software rendering when API explicitly selects a hardware device.
-amdgpu_device_initialize: amdgpu_query_info(ACCEL_WORKING) failed (-13)
-amdgpu: amdgpu_device_initialize failed.
-libEGL warning: egl: failed to create dri2 screen

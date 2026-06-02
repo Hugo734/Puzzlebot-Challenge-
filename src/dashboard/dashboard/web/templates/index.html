@@ -18,44 +18,13 @@
       </div>
     </div>
     <div class="header-status">
-      <div class="mode-switch" id="modeSwitch" title="Switch system mode">
-        <button class="mode-btn" data-mode="MAPPING" id="modeBtnMapping">MAP</button>
-        <button class="mode-btn active" data-mode="NAVIGATION" id="modeBtnNav">NAV</button>
-      </div>
-      <button class="map-btn save-map-btn hidden" id="btnSaveMap" title="Save current SLAM map to disk">
+      <button class="map-btn save-map-btn" id="btnSaveMap" title="Save current SLAM map to disk">
         &#128190; Save Map
-      </button>
-      <button class="map-btn" id="btnFitWorkspace" title="Auto-fit the known room rectangle to the detected walls and lock it as the workspace boundary">
-        &#128208; Fit Workspace
       </button>
       <span class="conn-dot" id="connDot"></span>
       <span class="conn-label" id="connLabel">Connecting…</span>
     </div>
   </header>
-
-  <!-- ================================================================
-       MAP RESET CONFIRM DIALOG (NAV → MAP)
-       ================================================================ -->
-  <div id="mapResetDialog" class="wp-popup hidden">
-    <div class="wp-popup-box">
-      <h3 class="wp-popup-title">Switch to Mapping</h3>
-      <p style="margin:0 0 14px 0">
-        Switching to MAPPING mode lets SLAM update the occupancy grid.
-        How do you want to start?
-      </p>
-      <div class="wp-popup-actions" style="flex-direction:column;gap:8px">
-        <button class="btn-submit" id="btnModeContinueMap">
-          Continue from current map
-        </button>
-        <button class="btn-cancel" id="btnModeResetMap">
-          Start from empty grid
-        </button>
-        <button class="btn-cancel" id="btnModeCancelSwitch" style="opacity:0.6">
-          Cancel
-        </button>
-      </div>
-    </div>
-  </div>
 
   <main class="grid">
 
@@ -122,6 +91,7 @@
       <div class="tab-bar">
         <button class="tab-btn active" data-tab="navigate">NAV</button>
         <button class="tab-btn" data-tab="mission">MISSION</button>
+        <button class="tab-btn" data-tab="sm">SM</button>
         <button class="tab-btn" data-tab="teleop">TELEOP</button>
         <button class="tab-btn" data-tab="camera">CAM</button>
         <button class="tab-btn" data-tab="voice">VOICE</button>
@@ -195,55 +165,53 @@
           <h2 class="card-title">Send Mission</h2>
           <form id="missionForm" class="mission-form" autocomplete="off">
 
-            <label class="form-label" for="palletId">Pallet ID</label>
-            <input id="palletId" class="form-input" type="text" placeholder="e.g. P001" required />
-
-            <label class="form-label" for="sourceSelect">Source</label>
-            <select id="sourceSelect" class="form-select" required>
-              <option value="">— select source —</option>
-              <optgroup label="Trucks">
-                <option value="truck_1">Truck 1</option>
-                <option value="truck_2">Truck 2</option>
-                <option value="truck_3">Truck 3</option>
-              </optgroup>
-              <optgroup label="Racks">
-                <option value="rack_1">Rack 1</option>
-                <option value="rack_2">Rack 2</option>
-              </optgroup>
-              <optgroup label="Rollers">
-                <option value="roller_1">Roller 1</option>
-                <option value="roller_2">Roller 2</option>
-              </optgroup>
+            <label class="form-label" for="missionType">Mission type</label>
+            <select id="missionType" class="form-select" required>
+              <option value="ROLLER_TO_TRUCK">Roller &rarr; Truck (search QR)</option>
+              <option value="RACK_TO_TRUCK">Rack &rarr; Truck (search QR)</option>
+              <option value="CUSTOM">Custom</option>
             </select>
 
-            <label class="form-label" for="sourceLevelSelect">Level</label>
-            <select id="sourceLevelSelect" class="form-select" required>
-              <option value="">— select level —</option>
-              <option value="1">1 — Floor</option>
-              <option value="2">2 — Rack level 2</option>
-              <option value="3">3 — Truck</option>
-            </select>
+            <label class="form-label" for="missionIdInput">Mission ID <span class="dim">(optional)</span></label>
+            <input id="missionIdInput" class="form-input" type="text" placeholder="auto" />
 
-            <label class="form-label" for="destSelect">Destination</label>
-            <select id="destSelect" class="form-select" required>
-              <option value="">— select destination —</option>
-              <optgroup label="Trucks">
-                <option value="truck_1">Truck 1</option>
-                <option value="truck_2">Truck 2</option>
-                <option value="truck_3">Truck 3</option>
-              </optgroup>
-              <optgroup label="Racks">
-                <option value="rack_1">Rack 1</option>
-                <option value="rack_2">Rack 2</option>
-              </optgroup>
-              <optgroup label="Rollers">
-                <option value="roller_1">Roller 1</option>
-                <option value="roller_2">Roller 2</option>
-              </optgroup>
-            </select>
+            <!-- =========== SEARCH MISSIONS (ROLLER / RACK) =========== -->
+            <div class="mission-section" id="missionSearchSection">
+              <label class="form-label">Candidates <span class="dim">(none → visit all)</span></label>
+              <div class="checkbox-grid" id="candidateList">
+                <span class="dim">Loading zones…</span>
+              </div>
+            </div>
+
+            <!-- =========== CUSTOM =========== -->
+            <div class="mission-section hidden" id="missionCustomSection">
+              <label class="form-label" for="customSource">Source waypoint</label>
+              <select id="customSource" class="form-select"></select>
+
+              <label class="sm-toggle-row">
+                <input type="checkbox" id="customScanQr" />
+                <span>Scan QR at source (use payload as destination)</span>
+              </label>
+
+              <label class="form-label" for="customDest">Destination</label>
+              <select id="customDest" class="form-select"></select>
+
+              <label class="sm-toggle-row">
+                <input type="checkbox" id="customSkipAlign" />
+                <span>Skip alignment (use waypoint pose only)</span>
+              </label>
+            </div>
+
+            <!-- =========== COMMON FIELDS =========== -->
+            <label class="form-label" for="pickupLevel">Pickup lifter level (0–7)</label>
+            <input id="pickupLevel" class="form-input" type="number" min="0" max="7" value="1" />
+
+            <label class="form-label" for="placeLevel">Place lifter level (0–7)</label>
+            <input id="placeLevel" class="form-input" type="number" min="0" max="7" value="2" />
 
             <button class="btn-submit" type="submit">&#9654; Send Mission</button>
           </form>
+          <pre class="sm-bb-json mono" id="missionPreview" style="margin-top:10px"></pre>
           <div id="toast" class="toast hidden"></div>
         </section>
 
@@ -367,6 +335,69 @@
         </section>
 
       </div><!-- /tab-voice -->
+
+      <!-- ---- TAB: STATE MACHINE ---- -->
+      <div class="tab-pane hidden" id="tab-sm">
+
+        <section class="card">
+          <h2 class="card-title">SM State</h2>
+          <div class="tele-grid">
+            <span class="tele-label">Current</span>
+            <span class="tele-val mono accent" id="smCurrentState">—</span>
+            <span class="tele-label">Mission</span>
+            <span class="tele-val mono" id="smMissionId">—</span>
+            <span class="tele-label">Type</span>
+            <span class="tele-val mono" id="smMissionType">—</span>
+            <span class="tele-label">Candidate</span>
+            <span class="tele-val mono" id="smCurrentCandidate">—</span>
+            <span class="tele-label">QR</span>
+            <span class="tele-val mono" id="smQrValue">—</span>
+            <span class="tele-label">Dest</span>
+            <span class="tele-val mono" id="smResolvedDest">—</span>
+            <span class="tele-label">Queue</span>
+            <span class="tele-val mono" id="smCandidateQueue">—</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Debug Controls</h2>
+          <div class="sm-btn-row">
+            <button class="btn-submit sm-btn" id="smBtnPause" type="button">&#10074;&#10074; Pause</button>
+            <button class="btn-submit sm-btn" id="smBtnResume" type="button">&#9654; Resume</button>
+          </div>
+          <div class="sm-btn-row">
+            <button class="btn-submit sm-btn" id="smBtnStep" type="button">&#10142; Step</button>
+            <button class="btn-cancel sm-btn" id="smBtnAbort" type="button">&#9632; Abort</button>
+          </div>
+          <label class="sm-toggle-row">
+            <input type="checkbox" id="smStepModeToggle" />
+            <span>Step mode (wait after every state)</span>
+          </label>
+          <div class="sm-force-row">
+            <label class="form-label" for="smForceSelect">Force outcome (one-shot)</label>
+            <div style="display:flex;gap:6px">
+              <select id="smForceSelect" class="form-select" style="flex:1">
+                <option value="">— select —</option>
+              </select>
+              <button class="btn-submit" id="smBtnForce" type="button">Send</button>
+            </div>
+            <p class="dim sm-hint" id="smWaitingHint"></p>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Recent Transitions</h2>
+          <ul class="history-list" id="smTransitionLog">
+            <li class="dim">No transitions yet</li>
+          </ul>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Blackboard (raw)</h2>
+          <pre class="sm-bb-json mono" id="smBlackboardJson">—</pre>
+        </section>
+
+      </div><!-- /tab-sm -->
 
     </aside>
   </main>

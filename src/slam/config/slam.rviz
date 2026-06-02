@@ -165,15 +165,15 @@ Visualization Manager:
       Name: LaserScan
       Position Transformer: XYZ
       Selectable: true
-      Size (Pixels): 3
-      Size (m): 0.029999999329447746
+      Size (Pixels): 4
+      Size (m): 0.04
       Style: Flat Squares
       Topic:
         Depth: 5
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /scan
       Use Fixed Frame: true
       Use rainbow: true
@@ -197,6 +197,47 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /slam_pose
+      Value: true
+    - Class: rviz_default_plugins/PoseArray
+      Enabled: true
+      Name: AMCL Particles
+      Color: 255; 220; 0
+      Shape: Arrow (Flat)
+      Arrow Length: 0.12
+      Alpha: 0.8
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /particle_cloud
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Name: SLAM Path
+      Enabled: true
+      Color: 0; 255; 100
+      Line Style: Lines
+      Topic: {Value: /slam_path, Reliability Policy: Reliable, Durability Policy: Volatile, History Policy: Keep Last, Depth: 1, Filter size: 10}
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Name: Odom Path (drift)
+      Enabled: true
+      Color: 255; 130; 0
+      Line Style: Lines
+      Topic: {Value: /odom_path, Reliability Policy: Reliable, Durability Policy: Volatile, History Policy: Keep Last, Depth: 1, Filter size: 10}
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Name: Ground Truth Path
+      Enabled: true
+      Color: 0; 180; 255
+      Line Style: Lines
+      Topic: {Value: /ground_truth_path, Reliability Policy: Reliable, Durability Policy: Volatile, History Policy: Keep Last, Depth: 1, Filter size: 10}
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Pose Graph
+      Enabled: true
+      Topic: {Value: /graph_markers, Reliability Policy: Reliable, Durability Policy: Volatile, History Policy: Keep Last, Depth: 1}
       Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true

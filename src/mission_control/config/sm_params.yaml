@@ -1,17 +1,23 @@
 state_machine_node:
   ros__parameters:
-    # Lifter level encoding (3-bit → FPGA via Jetson GPIO)
-    # 000=0 (rest) … 111=7 (max height)
-    rest_level:       0   # Fully lowered — safe approach / idle
-    transport_level:  1   # Carry height for floor picks
-    pick_floor_level: 3   # Insert forks under floor / rack-level-1 pallet
-    carry_level:      4   # Carry height for rack/truck picks
-    pick_rack_level:  5   # Insert forks under rack level-2 pallet
-    place_level:      3   # Lower pallet to destination surface
+    # Path to the zones/qr_aliases registry. Empty string ⇒ load the copy
+    # installed under the mission_control share directory.
+    zones_file: ""
 
-    # Alignment timeout before declaring alignment failed (seconds)
+    # SCAN_QR: how long to wait for /qr_detected after arriving at a
+    # candidate before declaring the spot empty and moving to the next one.
+    scan_qr_timeout: 4.0
+
+    # ALIGN_TO_PALLET: hard ceiling on how long we let qr_quad_alignment
+    # run before considering alignment failed.
     alignment_timeout: 30.0
 
-    # Navigation stuck timeout — passed to the navigation stack (seconds)
-    # The navigation node itself should handle the timeout; this is informational.
-    stuck_timeout: 15.0
+    # LIFT_PICKUP / LIFT_PLACE: how long to wait for /lifter_status to
+    # match the commanded level. The Jetson HAL acknowledges the new
+    # level once the FPGA has driven the GPIO lines and reported back.
+    lifter_timeout: 8.0
+
+    # Start the state machine in step mode (every state blocks after
+    # running until /sm/control receives {"action": "step"}). Useful for
+    # supervised first runs.
+    debug_step_mode_default: false

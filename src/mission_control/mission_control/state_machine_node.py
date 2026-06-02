@@ -1,459 +1,416 @@
 """
 state_machine_node.py
 ---------------------
-ROS2 node that hosts the YASMIN state machine for the AMR warehouse robot.
+ROS2 node hosting the YASMIN state machine for the AMR warehouse robot.
 
-Responsibilities:
-    - Subscribe to /mission, /navigation/status, /alignment_error, /voice_command
-    - Publish /navigation/goal, /lifter_level, /robot_state
-    - Populate a shared Blackboard with sensor data
-    - Build and run the YASMIN StateMachine in a background thread
-    - Publish /robot_state on every state transition
+I/O contract
+~~~~~~~~~~~~
+Subscribes
+    /mission             (String, JSON)         — mission requests
+    /nav_status          (String)               — from nav_node
+    /alignment_state     (String)               — from qr_quad_alignment
+    /alignment_error     (Point)                — kept for legacy consumers
+    /qr_detected         (String)               — from qr_quad_alignment
+    /lifter_status       (UInt8)                — from lifting_node
+    /voice_command       (String)               — from voice_control
+    /sm/control          (String, JSON)         — debugger commands
 
-State machine topology
-----------------------
-WAITING_COMMAND
-  → mission_received → NAVIGATING_SOURCE
-  → stop             → WAITING_COMMAND   (self-loop via "finish" terminal)
+Publishes
+    /goal_waypoint       (String)               — to nav_node
+    /lifter_level        (UInt8)                — to lifting_node
+    /alignment_start     (Bool)                 — to qr_quad_alignment
+    /robot_state         (String)               — current state name
+    /sm/blackboard       (String, JSON)         — periodic snapshot
+    /sm/transition       (String, JSON)         — one message per transition
 
-NAVIGATING_SOURCE
-  → arrived → ALIGNING_TO_PALLET
-  → stuck   → WAITING_COMMAND
-  → stop    → WAITING_COMMAND
-
-ALIGNING_TO_PALLET
-  → aligned → PICKING_DISPATCH
-  → failed  → WAITING_COMMAND
-  → stop    → WAITING_COMMAND
-
-PICKING_DISPATCH  (reads source_level from blackboard)
-  → floor → PICKING_FLOOR
-  → rack  → PICKING_RACK
-  → truck → PICKING_TRUCK
-
-PICKING_FLOOR / PICKING_RACK / PICKING_TRUCK
-  → picked → NAVIGATING_DEST
-  → stop   → WAITING_COMMAND
-
-NAVIGATING_DEST
-  → arrived → ALIGNING_TO_DEST
-  → stuck   → WAITING_COMMAND
-  → stop    → WAITING_COMMAND
-
-ALIGNING_TO_DEST
-  → aligned → PLACING_PALLET
-  → failed  → WAITING_COMMAND
-  → stop    → WAITING_COMMAND
-
-PLACING_PALLET
-  → placed → WAITING_COMMAND
-  → stop   → WAITING_COMMAND
+Debugger (/sm/control payloads)
+    {"action": "pause"}
+    {"action": "resume"}
+    {"action": "step"}
+    {"action": "set_step_mode", "value": true|false}
+    {"action": "force_outcome", "value": "<outcome>"}
+    {"action": "abort"}
+    {"action": "clear_abort"}
 """
 
-import math
-import threading
+from __future__ import annotations
+
+import json
 import logging
+import os
+import threading
+import time
+from collections import deque
 
 import rclpy
+from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
-from std_msgs.msg import String, UInt8
-from geometry_msgs.msg import PoseStamped, Point
+from geometry_msgs.msg import Point
+from std_msgs.msg import Bool, String, UInt8
 
-from yasmin import State, StateMachine, Blackboard
+from yasmin import Blackboard, StateMachine
 
-from mission_control.states.waiting_command import WaitingCommand
-from mission_control.states.navigating import Navigating
-from mission_control.states.aligning import Aligning
-from mission_control.states.picking_floor import PickingFloor
-from mission_control.states.picking_rack import PickingRack
-from mission_control.states.picking_truck import PickingTruck
-from mission_control.states.placing_pallet import PlacingPallet
+from mission_control.debug_wrapper import DebugContext
+from mission_control.bb_helpers import bb_get
+from mission_control.mission_parser import load_zones
+from mission_control.states.align_to_pallet import AlignToPallet
+from mission_control.states.idle import Idle
+from mission_control.states.lift_pickup import LiftPickup
+from mission_control.states.lift_place import LiftPlace
+from mission_control.states.mission_done import MissionDone
+from mission_control.states.mission_failed import MissionFailed
+from mission_control.states.nav_to_candidate import NavToCandidate
+from mission_control.states.nav_to_destination import NavToDestination
+from mission_control.states.next_candidate import NextCandidate
+from mission_control.states.plan_mission import PlanMission
+from mission_control.states.resolve_destination import ResolveDestination
+from mission_control.states.scan_qr import ScanQR
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# PickingDispatcher — lightweight branching state
-# ---------------------------------------------------------------------------
 
-
-class PickingDispatcher(State):
-    """Inspect blackboard["current_mission"]["source_level"] and branch.
-
-    Outcomes:
-        floor — source_level == 1
-        rack  — source_level == 2
-        truck — source_level == 3
-        stop  — global stop flag or unknown level
-    """
-
-    def __init__(self) -> None:
-        super().__init__(outcomes=["floor", "rack", "truck", "stop"])
-
-    def execute(self, blackboard: Blackboard) -> str:
-        if blackboard.get("stop_flag", False):
-            return "stop"
-
-        mission: dict = blackboard.get("current_mission", {})
-        source_level: int = mission.get("source_level", 0)
-
-        mapping = {1: "floor", 2: "rack", 3: "truck"}
-        outcome = mapping.get(source_level)
-        if outcome is None:
-            logger.error(
-                f"[PickingDispatcher] Unknown source_level={source_level}. "
-                "Returning stop."
-            )
-            return "stop"
-
-        logger.info(
-            f"[PickingDispatcher] source_level={source_level} → {outcome}"
-        )
-        return outcome
-
-
-# ---------------------------------------------------------------------------
-# StateMachineNode
-# ---------------------------------------------------------------------------
+def _reliable_qos(depth: int = 10) -> QoSProfile:
+    return QoSProfile(
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.VOLATILE,
+        depth=depth,
+    )
 
 
 class StateMachineNode(Node):
-    """ROS2 node that owns the shared blackboard and the YASMIN state machine."""
+    SNAPSHOT_HZ = 2.0
 
     def __init__(self) -> None:
         super().__init__("state_machine_node")
 
         # ── Parameters ────────────────────────────────────────────────────
+        self.declare_parameter("zones_file", "")
+        self.declare_parameter("scan_qr_timeout", 4.0)
         self.declare_parameter("alignment_timeout", 30.0)
-        self.declare_parameter("pick_floor_level",  3)
-        self.declare_parameter("pick_rack_level",   5)
-        self.declare_parameter("pick_truck_level",  3)
-        self.declare_parameter("carry_level",       4)
-        self.declare_parameter("place_level",       3)
-        self.declare_parameter("transport_level",   1)
-        self.declare_parameter("rest_level",        0)
+        self.declare_parameter("lifter_timeout", 8.0)
+        self.declare_parameter("debug_step_mode_default", False)
 
-        alignment_timeout: float = self.get_parameter("alignment_timeout").value
+        zones_path = str(self.get_parameter("zones_file").value)
+        if not zones_path:
+            zones_path = os.path.join(
+                get_package_share_directory("mission_control"), "config", "zones.yaml"
+            )
+        self._zones = load_zones(zones_path)
+        self.get_logger().info(f"Loaded zones from {zones_path}")
 
-        # ── Shared blackboard ─────────────────────────────────────────────
-        self._blackboard: Blackboard = Blackboard()
-        self._blackboard["mission"]           = None
-        self._blackboard["current_mission"]   = None
-        self._blackboard["nav_status"]        = "IDLE"
-        self._blackboard["alignment_error"]   = None
-        self._blackboard["stop_flag"]         = False
-        self._blackboard["voice_command"]     = None
+        scan_qr_timeout   = float(self.get_parameter("scan_qr_timeout").value)
+        alignment_timeout = float(self.get_parameter("alignment_timeout").value)
+        lifter_timeout    = float(self.get_parameter("lifter_timeout").value)
+        step_default      = bool(self.get_parameter("debug_step_mode_default").value)
 
-        # ── QoS ───────────────────────────────────────────────────────────
-        reliable_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
-            depth=10,
-        )
+        # ── Shared state ──────────────────────────────────────────────────
+        self._blackboard = Blackboard()
+        self._init_blackboard()
+        self._debug = DebugContext()
+        if step_default:
+            self._debug.set_step_mode(True)
+        self._current_state_name: str = "IDLE"
 
-        # ── Subscribers ───────────────────────────────────────────────────
-        self.create_subscription(
-            String,
-            "/navigation/status",
-            self._nav_status_callback,
-            reliable_qos,
-        )
-        self.create_subscription(
-            Point,
-            "/alignment_error",
-            self._alignment_error_callback,
-            reliable_qos,
-        )
-        self.create_subscription(
-            String,
-            "/mission",
-            self._mission_callback,
-            reliable_qos,
-        )
-        self.create_subscription(
-            String,
-            "/voice_command",
-            self._voice_command_callback,
-            reliable_qos,
-        )
+        # ── ROS I/O ───────────────────────────────────────────────────────
+        qos = _reliable_qos()
 
-        # ── Publishers ────────────────────────────────────────────────────
-        self._goal_pub = self.create_publisher(
-            PoseStamped, "/navigation/goal", reliable_qos
-        )
-        self._lifter_pub = self.create_publisher(
-            UInt8, "/lifter_level", reliable_qos
-        )
-        self._state_pub = self.create_publisher(
-            String, "/robot_state", reliable_qos
-        )
+        self.create_subscription(String, "/mission",          self._cb_mission,        qos)
+        self.create_subscription(String, "/nav_status",       self._cb_nav_status,     qos)
+        self.create_subscription(String, "/alignment_state",  self._cb_alignment_state, qos)
+        self.create_subscription(Point,  "/alignment_error",  self._cb_alignment_error, qos)
+        self.create_subscription(String, "/qr_detected",      self._cb_qr_detected,    qos)
+        self.create_subscription(UInt8,  "/lifter_status",    self._cb_lifter_status,  qos)
+        self.create_subscription(String, "/voice_command",    self._cb_voice,          qos)
+        self.create_subscription(String, "/sm/control",       self._cb_sm_control,     qos)
 
-        # ── Build state machine ───────────────────────────────────────────
-        self._sm = self._build_state_machine(alignment_timeout)
+        self._pub_goal       = self.create_publisher(String, "/goal_waypoint",   qos)
+        self._pub_lifter     = self.create_publisher(UInt8,  "/lifter_level",    qos)
+        self._pub_align      = self.create_publisher(Bool,   "/alignment_start", qos)
+        self._pub_state      = self.create_publisher(String, "/robot_state",     qos)
+        self._pub_blackboard = self.create_publisher(String, "/sm/blackboard",   qos)
+        self._pub_transition = self.create_publisher(String, "/sm/transition",   qos)
+
+        # ── Build SM ──────────────────────────────────────────────────────
+        self._sm = self._build_state_machine(
+            scan_qr_timeout=scan_qr_timeout,
+            alignment_timeout=alignment_timeout,
+            lifter_timeout=lifter_timeout,
+        )
+        self._sm.set_start_state("IDLE")
+
+        # ── Periodic snapshot ─────────────────────────────────────────────
+        self.create_timer(1.0 / self.SNAPSHOT_HZ, self._publish_snapshot)
 
         # ── Start SM thread ───────────────────────────────────────────────
-        # State hooks are already installed during _build_state_machine()
         self._sm_thread = threading.Thread(
-            target=self._run_state_machine, daemon=True, name="sm_thread"
+            target=self._run_state_machine, daemon=True, name="sm_thread",
         )
         self._sm_thread.start()
-
         self.get_logger().info("StateMachineNode started.")
 
-    # ── Subscriber callbacks ───────────────────────────────────────────────
+    # ------------------------------------------------------------------ init
+    def _init_blackboard(self) -> None:
+        bb = self._blackboard
+        bb["mission_raw"]         = None
+        bb["current_mission"]     = None
+        bb["candidate_queue"]     = None
+        bb["current_candidate"]   = None
+        bb["qr_value"]            = None
+        bb["qr_detected"]         = None
+        bb["qr_detected_at"]      = 0.0
+        bb["resolved_dest"]       = None
+        bb["nav_status_prefix"]   = "IDLE"
+        bb["nav_status_full"]     = "IDLE"
+        bb["alignment_state"]     = "IDLE"
+        bb["alignment_error"]     = None
+        bb["lifter_status"]       = None
+        bb["voice_command"]       = None
+        bb["mission_error_reason"] = None
 
-    def _nav_status_callback(self, msg: String) -> None:
-        """Write navigation status string to the blackboard."""
-        self._blackboard["nav_status"] = msg.data.strip().upper()
+    # ------------------------------------------------------------------ callbacks
+    def _cb_mission(self, msg: String) -> None:
+        if bb_get(self._blackboard, "current_mission") is not None:
+            self.get_logger().warn(
+                "Ignoring mission — one is already running. Send abort first."
+            )
+            return
+        self._blackboard["mission_raw"] = msg.data
+        self.get_logger().info(f"Mission queued: {msg.data[:120]}")
 
-    def _alignment_error_callback(self, msg: Point) -> None:
-        """Write the raw Point message to the blackboard."""
+    def _cb_nav_status(self, msg: String) -> None:
+        raw = msg.data.strip()
+        prefix = raw.split(":", 1)[0].upper()
+        self._blackboard["nav_status_prefix"] = prefix
+        self._blackboard["nav_status_full"] = raw
+
+    def _cb_alignment_state(self, msg: String) -> None:
+        self._blackboard["alignment_state"] = msg.data.strip().upper()
+
+    def _cb_alignment_error(self, msg: Point) -> None:
         self._blackboard["alignment_error"] = msg
 
-    def _mission_callback(self, msg: String) -> None:
-        """Write the raw mission JSON to the blackboard.
+    def _cb_qr_detected(self, msg: String) -> None:
+        payload = msg.data.strip()
+        if not payload:
+            return
+        self._blackboard["qr_detected"] = payload
+        self._blackboard["qr_detected_at"] = time.monotonic()
 
-        Only updates if the state machine is idle (mission == None) to avoid
-        overwriting an in-progress mission.  A PAUSE/STOP voice command should
-        be used to cancel running missions before issuing a new one.
-        """
-        if self._blackboard.get("mission") is None:
-            self._blackboard["mission"] = msg.data
-            self.get_logger().info(
-                f"[Node] New mission queued: {msg.data[:80]}"
-            )
-        else:
-            self.get_logger().warning(
-                "[Node] Mission ignored — previous mission still pending. "
-                "Send 'stop' to cancel first."
-            )
+    def _cb_lifter_status(self, msg: UInt8) -> None:
+        self._blackboard["lifter_status"] = int(msg.data)
 
-    def _voice_command_callback(self, msg: String) -> None:
-        """Handle recognised voice commands.
-
-        Supported commands (case-insensitive):
-            stop / pause  — set stop_flag to True
-            resume        — clear stop_flag
-        """
+    def _cb_voice(self, msg: String) -> None:
         cmd = msg.data.strip().lower()
         self._blackboard["voice_command"] = cmd
-        self.get_logger().info(f"[Node] Voice command received: {cmd!r}")
-
         if cmd in ("stop", "pause"):
-            self._blackboard["stop_flag"] = True
-            self._blackboard["mission"] = None  # discard pending mission
-            self.get_logger().info("[Node] STOP flag raised.")
+            self._debug.set_pause(True)
         elif cmd == "resume":
-            self._blackboard["stop_flag"] = False
-            self.get_logger().info("[Node] STOP flag cleared (resume).")
+            self._debug.set_pause(False)
 
-    # ── Publisher helpers (injected into states) ───────────────────────────
+    def _cb_sm_control(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self.get_logger().warn(f"/sm/control: invalid JSON: {msg.data!r}")
+            return
+        action = payload.get("action")
+        if action == "pause":
+            self._debug.set_pause(True)
+        elif action == "resume":
+            self._debug.set_pause(False)
+        elif action == "step":
+            self._debug.request_step()
+        elif action == "set_step_mode":
+            self._debug.set_step_mode(bool(payload.get("value", False)))
+        elif action == "force_outcome":
+            self._debug.set_force_outcome(payload.get("value"))
+        elif action == "abort":
+            self._debug.set_abort(True)
+            # Make sure the robot doesn't keep moving while in abort.
+            self._publish_goal("stop")
+            self._publish_alignment_start(False)
+        elif action == "clear_abort":
+            self._debug.set_abort(False)
+        else:
+            self.get_logger().warn(f"/sm/control: unknown action {action!r}")
+            return
+        self.get_logger().info(f"/sm/control: applied {payload}")
 
-    def _publish_goal(self, x: float, y: float, theta: float) -> None:
-        """Publish a PoseStamped navigation goal."""
-        msg = PoseStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "map"
-        msg.pose.position.x = x
-        msg.pose.position.y = y
-        msg.pose.position.z = 0.0
-        half = theta / 2.0
-        msg.pose.orientation.z = math.sin(half)
-        msg.pose.orientation.w = math.cos(half)
-        self._goal_pub.publish(msg)
-        self.get_logger().debug(
-            f"[Node] Goal published: ({x:.2f}, {y:.2f}, {math.degrees(theta):.1f}°)"
-        )
+    # ------------------------------------------------------------------ outputs
+    def _publish_goal(self, waypoint_name: str) -> None:
+        m = String(); m.data = waypoint_name
+        self._pub_goal.publish(m)
 
     def _publish_lifter(self, level: int) -> None:
-        """Publish a lifter level command (0–7)."""
-        msg = UInt8()
-        msg.data = max(0, min(7, level))
-        self._lifter_pub.publish(msg)
-        self.get_logger().debug(f"[Node] Lifter → {msg.data}")
+        m = UInt8(); m.data = max(0, min(7, int(level)))
+        self._pub_lifter.publish(m)
 
-    def _publish_robot_state(self, state_name: str) -> None:
-        """Publish the current state machine state name."""
-        msg = String()
-        msg.data = state_name
-        self._state_pub.publish(msg)
-        self.get_logger().info(f"[Node] Robot state → {state_name}")
+    def _publish_alignment_start(self, start: bool) -> None:
+        m = Bool(); m.data = bool(start)
+        self._pub_align.publish(m)
 
-    # ── State machine construction ─────────────────────────────────────────
+    def _publish_state(self, state_name: str) -> None:
+        self._current_state_name = state_name
+        m = String(); m.data = state_name
+        self._pub_state.publish(m)
+        self.get_logger().info(f"→ {state_name}")
 
-    def _wrap_with_state_pub(self, state_name: str, state_obj: State) -> State:
-        """Return state_obj with its execute() pre-wrapped to publish /robot_state.
+    def _publish_transition(self, state_name: str, outcome: str) -> None:
+        payload = {
+            "t": self.get_clock().now().nanoseconds / 1e9,
+            "state": state_name,
+            "outcome": outcome,
+        }
+        m = String(); m.data = json.dumps(payload)
+        self._pub_transition.publish(m)
 
-        The wrapping mutates the instance method rather than introducing a
-        wrapper class, so YASMIN's introspection of outcomes still works on the
-        original object.
-        """
-        original_execute = state_obj.execute
-        node_ref = self
+    def _publish_snapshot(self) -> None:
+        m = String(); m.data = json.dumps(self._snapshot_blackboard())
+        self._pub_blackboard.publish(m)
 
-        def _hooked_execute(blackboard: Blackboard) -> str:
-            node_ref._publish_robot_state(state_name)
-            return original_execute(blackboard)
+    def _snapshot_blackboard(self) -> dict:
+        bb = self._blackboard
+        mission = bb.get("current_mission")
+        queue = bb.get("candidate_queue")
+        ae = bb.get("alignment_error")
+        return {
+            "state":              self._current_state_name,
+            "mission_id":         (mission or {}).get("id"),
+            "mission_type":       (mission or {}).get("type"),
+            "candidate_queue":    list(queue) if isinstance(queue, deque) else None,
+            "current_candidate":  bb.get("current_candidate"),
+            "qr_detected":        bb.get("qr_detected"),
+            "qr_value":           bb.get("qr_value"),
+            "resolved_dest":      bb.get("resolved_dest"),
+            "nav_status":         bb.get("nav_status_full"),
+            "alignment_state":    bb.get("alignment_state"),
+            "alignment_error":    None if ae is None else {"x": ae.x, "y": ae.y, "z": ae.z},
+            "lifter_status":      bb.get("lifter_status"),
+            "voice_command":      bb.get("voice_command"),
+            "mission_error_reason": bb.get("mission_error_reason"),
+            "debug":              self._debug.snapshot(),
+        }
 
-        state_obj.execute = _hooked_execute  # type: ignore[method-assign]
-        return state_obj
-
-    def _add(
+    # ------------------------------------------------------------------ build SM
+    def _build_state_machine(
         self,
-        sm: StateMachine,
-        name: str,
-        state_obj: State,
-        transitions: dict[str, str],
-    ) -> None:
-        """Register a state with /robot_state publishing attached."""
-        sm.add_state(name, self._wrap_with_state_pub(name, state_obj), transitions)
-
-    def _build_state_machine(self, alignment_timeout: float) -> StateMachine:
-        """Construct and wire the complete YASMIN state machine."""
-
-        sm = StateMachine(outcomes=["finish", "error"])
-
-        # WAITING_COMMAND
-        self._add(
-            sm, "WAITING_COMMAND",
-            WaitingCommand(),
-            transitions={
-                "mission_received": "NAVIGATING_SOURCE",
-                "stop":             "WAITING_COMMAND",
-            },
+        scan_qr_timeout: float,
+        alignment_timeout: float,
+        lifter_timeout: float,
+    ) -> StateMachine:
+        sm = StateMachine(outcomes=["finish"])
+        kw = dict(
+            on_enter=self._publish_state,
+            on_transition=self._publish_transition,
         )
 
-        # NAVIGATING_SOURCE
-        self._add(
-            sm, "NAVIGATING_SOURCE",
-            Navigating(publish_goal_fn=self._publish_goal, phase="to_source"),
+        sm.add_state(
+            "IDLE",
+            Idle(self._debug, self._zones, **kw),
+            transitions={"mission_received": "PLAN_MISSION"},
+        )
+        sm.add_state(
+            "PLAN_MISSION",
+            PlanMission(self._debug, **kw),
+            transitions={"ok": "NAV_TO_CANDIDATE", "invalid": "MISSION_FAILED"},
+        )
+        sm.add_state(
+            "NAV_TO_CANDIDATE",
+            NavToCandidate(self._debug, self._publish_goal, **kw),
             transitions={
-                "arrived": "ALIGNING_TO_PALLET",
-                "stuck":   "WAITING_COMMAND",
-                "stop":    "WAITING_COMMAND",
+                "arrived": "SCAN_QR",
+                "stuck":   "NEXT_CANDIDATE",
+                "stop":    "MISSION_FAILED",
             },
         )
-
-        # ALIGNING_TO_PALLET
-        self._add(
-            sm, "ALIGNING_TO_PALLET",
-            Aligning(timeout=alignment_timeout),
+        sm.add_state(
+            "SCAN_QR",
+            ScanQR(self._debug, scan_qr_timeout, **kw),
             transitions={
-                "aligned": "PICKING_DISPATCH",
-                "failed":  "WAITING_COMMAND",
-                "stop":    "WAITING_COMMAND",
+                "qr_found":     "RESOLVE_DESTINATION",
+                "qr_not_found": "NEXT_CANDIDATE",
+                "stop":         "MISSION_FAILED",
             },
         )
-
-        # PICKING_DISPATCH — branches based on source_level
-        self._add(
-            sm, "PICKING_DISPATCH",
-            PickingDispatcher(),
+        sm.add_state(
+            "NEXT_CANDIDATE",
+            NextCandidate(self._debug, **kw),
             transitions={
-                "floor": "PICKING_FLOOR",
-                "rack":  "PICKING_RACK",
-                "truck": "PICKING_TRUCK",
-                "stop":  "WAITING_COMMAND",
+                "more":      "NAV_TO_CANDIDATE",
+                "exhausted": "MISSION_FAILED",
             },
         )
-
-        # PICKING_FLOOR
-        self._add(
-            sm, "PICKING_FLOOR",
-            PickingFloor(publish_lifter_fn=self._publish_lifter),
+        sm.add_state(
+            "RESOLVE_DESTINATION",
+            ResolveDestination(self._debug, self._zones, **kw),
+            transitions={"resolved": "ALIGN_TO_PALLET", "invalid": "MISSION_FAILED"},
+        )
+        sm.add_state(
+            "ALIGN_TO_PALLET",
+            AlignToPallet(self._debug, self._publish_alignment_start, alignment_timeout, **kw),
             transitions={
-                "picked": "NAVIGATING_DEST",
-                "stop":   "WAITING_COMMAND",
+                "aligned": "LIFT_PICKUP",
+                "failed":  "MISSION_FAILED",
+                "stop":    "MISSION_FAILED",
             },
         )
-
-        # PICKING_RACK
-        self._add(
-            sm, "PICKING_RACK",
-            PickingRack(publish_lifter_fn=self._publish_lifter),
+        sm.add_state(
+            "LIFT_PICKUP",
+            LiftPickup(self._debug, self._publish_lifter, lifter_timeout, **kw),
             transitions={
-                "picked": "NAVIGATING_DEST",
-                "stop":   "WAITING_COMMAND",
+                "picked":      "NAV_TO_DESTINATION",
+                "lifter_fail": "MISSION_FAILED",
+                "stop":        "MISSION_FAILED",
             },
         )
-
-        # PICKING_TRUCK
-        self._add(
-            sm, "PICKING_TRUCK",
-            PickingTruck(publish_lifter_fn=self._publish_lifter),
+        sm.add_state(
+            "NAV_TO_DESTINATION",
+            NavToDestination(self._debug, self._publish_goal, **kw),
             transitions={
-                "picked": "NAVIGATING_DEST",
-                "stop":   "WAITING_COMMAND",
+                "arrived": "LIFT_PLACE",
+                "stuck":   "MISSION_FAILED",
+                "stop":    "MISSION_FAILED",
             },
         )
-
-        # NAVIGATING_DEST
-        self._add(
-            sm, "NAVIGATING_DEST",
-            Navigating(publish_goal_fn=self._publish_goal, phase="to_dest"),
+        sm.add_state(
+            "LIFT_PLACE",
+            LiftPlace(self._debug, self._publish_lifter, lifter_timeout, **kw),
             transitions={
-                "arrived": "ALIGNING_TO_DEST",
-                "stuck":   "WAITING_COMMAND",
-                "stop":    "WAITING_COMMAND",
+                "placed":      "MISSION_DONE",
+                "lifter_fail": "MISSION_FAILED",
+                "stop":        "MISSION_FAILED",
             },
         )
-
-        # ALIGNING_TO_DEST
-        self._add(
-            sm, "ALIGNING_TO_DEST",
-            Aligning(timeout=alignment_timeout),
-            transitions={
-                "aligned": "PLACING_PALLET",
-                "failed":  "WAITING_COMMAND",
-                "stop":    "WAITING_COMMAND",
-            },
+        sm.add_state(
+            "MISSION_DONE",
+            MissionDone(self._debug, **kw),
+            transitions={"ok": "IDLE"},
         )
-
-        # PLACING_PALLET
-        self._add(
-            sm, "PLACING_PALLET",
-            PlacingPallet(publish_lifter_fn=self._publish_lifter),
-            transitions={
-                "placed": "WAITING_COMMAND",
-                "stop":   "WAITING_COMMAND",
-            },
+        sm.add_state(
+            "MISSION_FAILED",
+            MissionFailed(self._debug, **kw),
+            transitions={"ok": "IDLE"},
         )
 
         return sm
 
-    # ── SM execution thread ────────────────────────────────────────────────
-
+    # ------------------------------------------------------------------ thread
     def _run_state_machine(self) -> None:
-        """Run the state machine loop.  Publishes /robot_state on each tick.
-
-        YASMIN's StateMachine.execute() runs the machine until it reaches a
-        terminal outcome ("finish" or "error").  We wrap it in an outer loop
-        so the machine restarts automatically — the WAITING_COMMAND state acts
-        as the persistent idle point between missions.
-        """
-        self.get_logger().info("[SM Thread] Starting state machine loop.")
-
+        import traceback
         while rclpy.ok():
             try:
-                self.get_logger().info("[SM Thread] Executing state machine.")
-                outcome = self._sm.execute(self._blackboard)
-                self.get_logger().info(
-                    f"[SM Thread] State machine finished with outcome: {outcome!r}"
-                )
-            except Exception as exc:  # noqa: BLE001
+                # yasmin StateMachine is invoked via __call__, not .execute.
+                self._sm(self._blackboard)
+            except Exception:  # noqa: BLE001
                 self.get_logger().error(
-                    f"[SM Thread] Unhandled exception in state machine: {exc}",
-                    exc_info=True,
+                    "State machine raised — restarting in 1s.\n" + traceback.format_exc()
                 )
-                self._publish_robot_state("ERROR")
+                time.sleep(1.0)
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
+# ----------------------------------------------------------------------------
 def main() -> None:
     rclpy.init()
     node = StateMachineNode()
@@ -462,7 +419,6 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        node.get_logger().info("Shutting down StateMachineNode.")
         node.destroy_node()
         rclpy.shutdown()
 

@@ -31,6 +31,8 @@ setup(
             'twist_relay = controller.twist_relay:main',
             'lifter_controller = controller.lifter_controller:main',
             'real_odom = controller.real_odom:main',
+            'velocity_bridge = controller.velocity_bridge:main',
+            'map_odom_relay = controller.map_odom_relay:main',
         ],
     },
 )

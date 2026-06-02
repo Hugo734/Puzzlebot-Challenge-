@@ -1,0 +1,41 @@
+# Semantic metadata for mission_control.
+#
+# Coordinates of the waypoints themselves live in nav_node's waypoints.yaml
+# (loaded by the navigation package). This file only declares which waypoint
+# names belong to which class of zone, and the mapping from QR payload
+# strings to truck waypoint names.
+#
+# Keep the waypoint names here in sync with the ones registered by the
+# navigation/waypoint_recorder. mission_parser validates against this file
+# before accepting a mission.
+
+zones:
+  rollers:
+    - roller_1
+    - roller_2
+    - roller_3
+
+  # Pallets stored at rack level 1 (lower shelf).
+  racks_l1:
+    - rack_1_l1
+    - rack_2_l1
+
+  # Pallets stored at rack level 2 (upper shelf).
+  racks_l2:
+    - rack_1_l2
+    - rack_2_l2
+
+  trucks:
+    - truck_1
+    - truck_2
+    - truck_3
+
+# Decoded QR payload → truck waypoint name. The decoded string is upper-cased
+# and stripped before lookup, so list the keys in upper case here.
+qr_aliases:
+  T1:        truck_1
+  T2:        truck_2
+  T3:        truck_3
+  MERCADONA: truck_1
+  DHL:       truck_2
+  COCACOLA:  truck_3

@@ -141,10 +141,16 @@ class LocalCostmap:
         rx: float,
         ry: float,
         rtheta: float,
+        lidar_yaw: float = 0.0,
     ) -> None:
         """Mark scan hit cells with score 1.0 (in-place).
 
         Rays beyond scan.range_max are treated as no information.
+
+        `lidar_yaw` is the yaw of the scan frame relative to the robot body
+        (base_link).  It is added to every ray bearing so a rear-mounted
+        LiDAR (yaw=π on the real Puzzlebot) projects hits to the correct
+        world location instead of 180° away.
         """
         if not self._centered or scan is None:
             return
@@ -163,8 +169,9 @@ class LocalCostmap:
         a = angles[valid]
         r = ranges[valid]
 
-        wx = rx + r * np.cos(rtheta + a)
-        wy = ry + r * np.sin(rtheta + a)
+        bearing = rtheta + lidar_yaw + a
+        wx = rx + r * np.cos(bearing)
+        wy = ry + r * np.sin(bearing)
 
         cx = ((wx - self._origin_x) / self.resolution).astype(np.int32)
         cy = ((wy - self._origin_y) / self.resolution).astype(np.int32)

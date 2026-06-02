@@ -14,6 +14,18 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
+# ─────────────────────────────────────────────────────────────────────────
+#  ⚠  GAZEBO = VISUALIZATION / INTEGRATION SIM ONLY  (desktop, not the robot)
+#
+#  * Physics is rigid-body and SLIP-FREE.  The real Puzzlebot MCR2 slips ~12%
+#    in rotation / ~4% in translation, so its wheel odometry drifts on turns.
+#    SLAM's motion-noise + scan-match gains are tuned for that slip; validating
+#    them against Gazebo's perfect odometry will look great here and DIVERGE on
+#    the real robot.  Tune SLAM with `ros2 launch slam sim.launch.py`
+#    (puzzlebot_sim) which models slip AND LiDAR latency.
+#  * This launch runs full Gazebo + Ogre2 + Xvfb — it will NOT fit a 2 GB
+#    Jetson Nano.  On the robot use bringup/robot.launch.py + laptop.launch.py.
+# ─────────────────────────────────────────────────────────────────────────
 def generate_launch_description():
     puzzlebot_description = get_package_share_directory("description")
 
@@ -69,6 +81,39 @@ def generate_launch_description():
 
     ign_exec = shutil.which("ign") or "ign"
 
+    # ── Render backend selection (GZ_RENDER env var) ──────────────────
+    #   GZ_RENDER=nvidia   → Ogre2 renders the LiDAR/camera on the NVIDIA GPU
+    #                        via EGL headless (no X needed).  Gazebo then uses a
+    #                        DIFFERENT GL stack than RViz (which uses Mesa/AMD on
+    #                        :0), so the two no longer deadlock on a shared Mesa
+    #                        resource → RViz opens alongside Gazebo on this
+    #                        dual-GPU laptop.  This is the default.
+    #   GZ_RENDER=software → Mesa llvmpipe on Xvfb :99 (no GPU).  Robust fallback
+    #                        for machines without a usable NVIDIA EGL device, but
+    #                        it contends with RViz's GL on this machine (RViz won't
+    #                        open).  Use with rviz:=false (headless backend).
+    gz_render = os.environ.get("GZ_RENDER", "nvidia").lower()
+    if gz_render == "nvidia":
+        # NVIDIA EGL headless: surfaceless, no X display required for the render.
+        render_env = (
+            "__NV_PRIME_RENDER_OFFLOAD=1 "
+            "__GLX_VENDOR_LIBRARY_NAME=nvidia "
+            "__VK_LAYER_NV_optimus=NVIDIA_only "
+            "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json "
+        )
+        render_flags = "--headless-rendering "
+    else:
+        # Pure Mesa software (llvmpipe) on Xvfb :99 — never touches a GPU.
+        render_env = (
+            "DISPLAY=:99 "
+            "LIBGL_ALWAYS_SOFTWARE=1 "
+            "__GLX_VENDOR_LIBRARY_NAME=mesa "
+            "GALLIUM_DRIVER=llvmpipe "
+            "MESA_LOADER_DRIVER_OVERRIDE=llvmpipe "
+            "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json "
+        )
+        render_flags = ""
+
     # Server-only mode (-s): runs physics without the GUI.
     # The GUI can be connected separately with: ign gazebo -g
     # This avoids the SIGINT crash that occurs when the GUI's Qt/ogre2
@@ -77,8 +122,16 @@ def generate_launch_description():
     # software GLX instead of the NVIDIA or AMD hardware driver.  The real display
     # (:0) has NVIDIA 580 drivers installed which ignore LIBGL_ALWAYS_SOFTWARE and
     # the AMD GPU segfaults on GL3Plus buffer upload.
+    # Remove any STALE :99 lock/socket before starting Xvfb.  A previous run
+    # that was killed (Ctrl-C, crash) leaves /tmp/.X99-lock behind; the next
+    # Xvfb then fails to own :99 and Gazebo's Ogre2 render thread hangs forever
+    # at "Sensors.cc: Waiting for init" → no /scan, controller never activates,
+    # and the whole sim looks "stuck".  Cleaning the lock makes every launch
+    # start from a fresh display.  (:99 is private to this sim, so this is safe.)
     xvfb = ExecuteProcess(
-        cmd=["Xvfb", ":99", "-screen", "0", "1280x1024x24"],
+        cmd=["bash", "-c",
+             "rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null; "
+             "exec Xvfb :99 -screen 0 1280x1024x24"],
         output="screen",
         on_exit=None,
     )
@@ -87,15 +140,13 @@ def generate_launch_description():
         cmd=[
             "bash", "-c",
             (
-                f"DISPLAY=:99 "
-                f"LIBGL_ALWAYS_SOFTWARE=1 "
-                f"__GLX_VENDOR_LIBRARY_NAME=mesa "
+                f"{render_env}"
                 f"IGN_IP=127.0.0.1 "
                 f"GZ_SIM_SYSTEM_PLUGIN_PATH={plugin_path} "
                 f"IGN_GAZEBO_SYSTEM_PLUGIN_PATH={plugin_path} "
                 f"GZ_SIM_RESOURCE_PATH={model_path} "
                 f"IGN_GAZEBO_RESOURCE_PATH={model_path} "
-                f"ruby {ign_exec} gazebo -s -r $0 -v 4 --force-version 6"
+                f"ruby {ign_exec} gazebo -s -r {render_flags}$0 -v 4 --force-version 6"
             ),
             world_path,
         ],
@@ -167,11 +218,17 @@ def generate_launch_description():
         ]
     )
 
-    # Relay /cmd_vel → /puzzlebot_controller/cmd_vel_unstamped
+    # Relay /cmd_vel_in → /puzzlebot_controller/cmd_vel_unstamped.
+    # Every upstream node (navigation, dashboard, perception, teleop) publishes
+    # to /cmd_vel_in (same convention as the real robot, where twist_relay
+    # consumes it).  In sim we forward it straight to the diff_drive controller,
+    # whose own linear/angular acceleration limits provide the smoothing that
+    # twist_relay provides on hardware.  Relaying /cmd_vel (the OLD input) left
+    # /cmd_vel_in unconsumed, so the robot never moved under navigation.
     cmd_vel_relay = Node(
         package="topic_tools",
         executable="relay",
-        arguments=["/cmd_vel", "/puzzlebot_controller/cmd_vel_unstamped"],
+        arguments=["/cmd_vel_in", "/puzzlebot_controller/cmd_vel_unstamped"],
         output="screen",
     )
 
@@ -180,7 +237,12 @@ def generate_launch_description():
         world_name_arg,
         gz_resource_path,
         ign_resource_path,
-        gl_software,
+        # NOTE: gl_software (LIBGL_ALWAYS_SOFTWARE=1) is intentionally NOT added
+        # globally here — it would leak into RViz (started by the parent launch)
+        # and break RViz's GPU GL on :0.  The Gazebo SERVER that actually needs
+        # Mesa software GL already sets LIBGL_ALWAYS_SOFTWARE=1 inline in its own
+        # bash command above, so removing the global setter changes nothing for
+        # Gazebo while letting RViz use the real GPU.
         robot_state_publisher_node,
         xvfb,
         gazebo_server,

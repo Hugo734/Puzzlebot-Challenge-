@@ -62,14 +62,10 @@ def _get_hmm_recognizer():
     return _hmm_recognizer
 
 # ---------------------------------------------------------------------------
-# Valid location choices for mission form validation
+# Mission validation — types accepted by mission_control's parser.
 # ---------------------------------------------------------------------------
 
-VALID_LOCATIONS = {
-    "rack_1", "rack_2", "roller_1", "roller_2",
-    "truck_1", "truck_2", "truck_3",
-}
-VALID_LEVELS = {1, 2, 3}
+VALID_MISSION_TYPES = {"ROLLER_TO_TRUCK", "RACK_TO_TRUCK", "CUSTOM"}
 
 # ---------------------------------------------------------------------------
 # Teleop watchdog state
@@ -123,12 +119,77 @@ def get_state():
         {
             "pose": state.pose,
             "state": state.state,
+            "nav_status": state.nav_status,
             "mission": state.mission,
             "velocity": state.velocity,
             "lifter_level": state.lifter_level,
             "system_mode": state.system_mode,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# mission_control debugger surface
+# ---------------------------------------------------------------------------
+
+# Outcomes per state — used by the front-end to populate the Force-outcome
+# dropdown and by the server to reject malformed requests.
+_SM_OUTCOMES = {
+    "IDLE":                ["mission_received"],
+    "PLAN_MISSION":        ["ok", "invalid"],
+    "NAV_TO_CANDIDATE":    ["arrived", "stuck", "stop"],
+    "SCAN_QR":             ["qr_found", "qr_not_found", "stop"],
+    "NEXT_CANDIDATE":      ["more", "exhausted"],
+    "RESOLVE_DESTINATION": ["resolved", "invalid"],
+    "ALIGN_TO_PALLET":     ["aligned", "failed", "stop"],
+    "LIFT_PICKUP":         ["picked", "lifter_fail", "stop"],
+    "NAV_TO_DESTINATION":  ["arrived", "stuck", "stop"],
+    "LIFT_PLACE":          ["placed", "lifter_fail", "stop"],
+    "MISSION_DONE":        ["ok"],
+    "MISSION_FAILED":      ["ok"],
+}
+
+_SM_VALID_ACTIONS = {
+    "pause", "resume", "step", "abort", "clear_abort", "set_step_mode", "force_outcome",
+}
+
+
+@app.route("/api/sm/outcomes")
+def sm_outcomes():
+    """Return the per-state outcome map for the Force-outcome dropdown."""
+    return jsonify(_SM_OUTCOMES)
+
+
+@app.route("/api/sm/snapshot")
+def sm_snapshot():
+    """Return the latest /sm/blackboard payload + recent transitions."""
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+    return jsonify({
+        "snapshot":    ros_bridge.get_sm_snapshot(),
+        "transitions": ros_bridge.get_sm_transitions(),
+    })
+
+
+@app.route("/api/sm/control", methods=["POST"])
+def sm_control():
+    """Forward a debugger command to /sm/control."""
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+    body = request.get_json(silent=True) or {}
+    action = body.get("action")
+    if action not in _SM_VALID_ACTIONS:
+        return jsonify({"error": f"invalid action {action!r}"}), 400
+    payload = {"action": action}
+    if action == "set_step_mode":
+        payload["value"] = bool(body.get("value", False))
+    elif action == "force_outcome":
+        outcome = body.get("value")
+        if not isinstance(outcome, str) or not outcome:
+            return jsonify({"error": "force_outcome requires non-empty 'value'"}), 400
+        payload["value"] = outcome
+    ros_bridge.publish_sm_control(payload)
+    return jsonify({"ok": True, "sent": payload})
 
 
 @app.route("/api/mode", methods=["GET"])
@@ -198,68 +259,54 @@ def reset_map():
     return jsonify({"success": ok, "message": msg}), code
 
 
-@app.route("/api/slam/fit_workspace", methods=["POST"])
-def fit_workspace():
-    """Auto-fit the workspace rectangle to the currently-mapped walls."""
-    if ros_bridge is None:
-        return jsonify({"error": "ROS bridge not initialised"}), 503
-    ok, msg = ros_bridge.call_auto_fit_workspace()
-    code = 200 if ok else 500
-    return jsonify({"success": ok, "message": msg}), code
-
-
 @app.route("/api/mission", methods=["POST"])
 def send_mission():
-    """
-    Accept a mission JSON and publish it to /mission.
+    """Accept a mission JSON and forward it to /mission.
 
-    Expected body:
-        {
-            "pallet_id": "P001",
-            "source": "truck_1",
-            "source_level": 3,
-            "destination": "rack_2"
-        }
+    The full schema (per type) is validated by mission_control's parser; this
+    endpoint only enforces the type tag so obviously-wrong payloads don't
+    reach the topic. See src/mission_control/mission_control/mission_parser.py.
     """
     if ros_bridge is None:
         return jsonify({"error": "ROS bridge not initialised"}), 503
 
     body = request.get_json(silent=True)
-    if body is None:
+    if not isinstance(body, dict):
         return jsonify({"error": "Invalid JSON body"}), 400
 
-    # --- Validation ---
-    pallet_id = body.get("pallet_id", "").strip()
-    source = body.get("source", "")
-    destination = body.get("destination", "")
+    mtype = body.get("type")
+    if mtype not in VALID_MISSION_TYPES:
+        return jsonify({
+            "error": f"type must be one of {sorted(VALID_MISSION_TYPES)}",
+        }), 400
+
+    body.setdefault("id", f"ui_{int(time.time())}")
+    ros_bridge.publish_mission(json.dumps(body))
+    return jsonify({"status": "ok", "mission": body})
+
+
+@app.route("/api/sm/zones")
+def sm_zones():
+    """Return mission_control's zones.yaml so the UI can populate dropdowns."""
+    import yaml
+    from ament_index_python.packages import (
+        get_package_share_directory, PackageNotFoundError,
+    )
     try:
-        source_level = int(body.get("source_level", 0))
-    except (TypeError, ValueError):
-        return jsonify({"error": "source_level must be an integer"}), 400
-
-    errors = []
-    if not pallet_id:
-        errors.append("pallet_id is required")
-    if source not in VALID_LOCATIONS:
-        errors.append(f"source must be one of {sorted(VALID_LOCATIONS)}")
-    if destination not in VALID_LOCATIONS:
-        errors.append(f"destination must be one of {sorted(VALID_LOCATIONS)}")
-    if source_level not in VALID_LEVELS:
-        errors.append(f"source_level must be one of {sorted(VALID_LEVELS)}")
-    if source == destination:
-        errors.append("source and destination must be different")
-
-    if errors:
-        return jsonify({"error": "; ".join(errors)}), 400
-
-    mission = {
-        "pallet_id": pallet_id,
-        "source": source,
-        "source_level": source_level,
-        "destination": destination,
-    }
-    ros_bridge.publish_mission(json.dumps(mission))
-    return jsonify({"status": "ok", "mission": mission})
+        zones_path = os.path.join(
+            get_package_share_directory("mission_control"),
+            "config",
+            "zones.yaml",
+        )
+        with open(zones_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return jsonify(data)
+    except PackageNotFoundError:
+        return jsonify({"error": "mission_control package not installed"}), 503
+    except FileNotFoundError:
+        return jsonify({"error": "zones.yaml not found"}), 503
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/map")
@@ -586,6 +633,8 @@ def _background_socketio_emitter() -> None:
     last_state_str = ""
     last_telemetry_time = 0.0
     last_nav_plan_str = ""
+    last_sm_snapshot_str = ""
+    last_transition_count = 0
     tick = 0
     interval = 0.2  # 5 Hz base tick
 
@@ -633,6 +682,22 @@ def _background_socketio_emitter() -> None:
                 "nav_plan",
                 {"points": state.nav_plan or []},
             )
+
+        # mission_control SM snapshot — emit on change (~2 Hz upstream).
+        sm_snapshot = ros_bridge.get_sm_snapshot()
+        if sm_snapshot is not None:
+            snap_str = json.dumps(sm_snapshot, sort_keys=True)
+            if snap_str != last_sm_snapshot_str:
+                last_sm_snapshot_str = snap_str
+                socketio.emit("sm_snapshot", sm_snapshot)
+
+        # SM transitions — emit only newly arrived ones.
+        transitions = ros_bridge.get_sm_transitions()
+        if len(transitions) > last_transition_count:
+            new_transitions = transitions[last_transition_count:]
+            last_transition_count = len(transitions)
+            for tr in new_transitions:
+                socketio.emit("sm_transition", tr)
 
         # 1 Hz — telemetry
         now = time.monotonic()
@@ -687,3 +752,10 @@ def on_connect():
             "map_png": None,
         },
     )
+    snap = ros_bridge.get_sm_snapshot()
+    if snap is not None:
+        socketio.emit("sm_snapshot", snap)
+    transitions = ros_bridge.get_sm_transitions()
+    if transitions:
+        # Send all buffered transitions so the log isn't empty on reconnect.
+        socketio.emit("sm_transition_bulk", transitions)

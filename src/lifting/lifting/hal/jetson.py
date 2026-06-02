@@ -9,6 +9,8 @@ Jetson.GPIO is imported at runtime so this module can be imported on
 non-Jetson machines without raising ImportError.
 """
 
+from __future__ import annotations
+
 from lifting.hal.base import GpioDriver
 
 

@@ -85,11 +85,15 @@ def generate_launch_description():
         package='slam',
         executable='slam_node',
         name='slam_node',
+        # CPU AMCL in the Gazebo sim: RViz already uses the GPU for its 3D
+        # view, and CUDA context init + per-scan scoring then contend with it
+        # (slow first map→odom → the RobotModel takes ages to appear).  The
+        # CPU path is ~10-17 ms/scan — comfortably inside the 10 Hz budget —
+        # so the sim stays responsive.  The REAL robot (robot.launch.py, no
+        # Gazebo/RViz competing for the GPU) keeps amcl_use_cuda:=true.
         parameters=[slam_params_path, {
-            'use_sim_time': True,
-            'use_icp':      False,
-            'map_yaml':     map_yaml,
-            'start_mode':   start_mode,
+            'use_sim_time':   True,
+            'amcl_use_cuda':  False,
         }],
         remappings=[('/odom', '/puzzlebot_controller/odom')],
         output='screen',
@@ -145,13 +149,30 @@ def generate_launch_description():
     )])
 
     # ── 7. RViz2 ──────────────────────────────────────────────────────
-    rviz_node = TimerAction(period=20.0, actions=[Node(
+    # Start RViz EARLY (t=2), BEFORE Gazebo's Ogre2 render thread initialises
+    # (~t=12-15, after the robot spawns).  Diagnosis (in the user's session)
+    # showed RViz hangs during its OWN GL/Ogre init — no /dev/dri fds open,
+    # main thread parked in nanosleep — but ONLY while Gazebo's render is
+    # already active.  It is a render-init contention, NOT a frame/timing
+    # issue.  Letting RViz grab + finish its GL context first (it needs ~3-5 s
+    # and the GPU is idle that early) should make it immune; the scene then
+    # fills in as TF/map/scan arrive (RViz retries TF forever, so starting
+    # before the data exists is fine).
+    # Do NOT set MESA_GL_VERSION_OVERRIDE / LIBGL_ALWAYS_SOFTWARE here: RViz is
+    # a normal GUI app on the logged-in session and must use the desktop GPU
+    # natively (verified ~190 MB RSS, "OpenGl version: 4.6").
+    rviz_node = TimerAction(period=2.0, actions=[Node(
         package='rviz2',
         executable='rviz2',
         name='rviz2',
         arguments=['-d', rviz_cfg_path],
         parameters=[{'use_sim_time': True}],
-        additional_env={'MESA_GL_VERSION_OVERRIDE': '3.3COMPAT'},
+        # RViz must use the real GPU on :0 (like the desktop).  This Mesa build
+        # treats LIBGL_ALWAYS_SOFTWARE as "set = force software" regardless of
+        # value (even "0" forces it), so the var must be UNSET, not "0".  We do
+        # NOT set it here, and gazebo.launch.py no longer leaks it globally
+        # (only its own server subprocess sets it inline), so RViz inherits no
+        # LIBGL var and gets a native OpenGL 4.6 context.
         output='screen',
         condition=__import__('launch.conditions', fromlist=['IfCondition']).IfCondition(
             LaunchConfiguration('rviz')

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 
 
@@ -9,16 +11,19 @@ class GpioDriver(ABC):
         """Initialize GPIO hardware."""
 
     @abstractmethod
-    def set_level(self, level: int) -> None:
-        """Set lifter to level 0-7 via 3-bit binary encoding.
+    def set_level(self, level: int) -> int | None:
+        """Set lifter to the given level via the underlying transport.
 
-        Bit mapping (board pin numbering):
-            bit 0 → pin 11
-            bit 1 → pin 13
-            bit 2 → pin 15
+        Backends:
+            jetson — 3-bit binary on pins 11/13/15, levels 0-7.
+            spi    — 2-bit level packed in a byte, levels 0-3.
+            mock   — logs only.
 
         Args:
-            level: Integer in range [0, 7].
+            level: Non-negative integer; range depends on backend.
+
+        Returns:
+            For SPI, the byte echoed by the FPGA. Otherwise None.
         """
 
     @abstractmethod
