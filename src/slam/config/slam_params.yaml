@@ -34,6 +34,17 @@ slam_node:
     map_publish_every: 5
     base_frame:        base_link
 
+    # LiDAR latency compensation: subtracted from the scan header.stamp before
+    # looking up the odom pose to match against. The RPLIDAR A1 over serial
+    # timestamps at DELIVERY, not capture, so the pose used for matching lags
+    # the real one during motion → systematic drift (scan floats off the walls,
+    # worst during turns). 0.04 s is a starting estimate.
+    # TUNING (on the robot, in localization-only): rotate in place at a steady
+    # rate and watch the scan vs the map walls in RViz — if the scan trails
+    # BEHIND the walls in the direction of rotation, INCREASE this; if it leads,
+    # decrease. Re-check straight-line driving after. Typical range 0.02–0.08 s.
+    scan_time_offset:  0.04
+
     # Map-write motion gate.
     min_delta_xy:      0.02
     min_delta_theta:   0.02
@@ -60,11 +71,15 @@ slam_node:
     amcl_alpha2:                0.05    # trans→rot
     amcl_alpha3:                0.10    # trans→trans
     amcl_alpha4:                0.03    # rot→trans
-    # σ=0.10 (NOT tighter): while the map is still building, a too-peaky
-    # sensor model collapses all particle weights → divergence.  Keep
-    # it robust.  240 beams is a good middle (more than 180 for sharper
-    # localisation, not the full 360 that over-peaks the weight product).
-    amcl_sigma_hit:             0.10
+    # σ_hit = sharpness of the likelihood-field match. SMALLER = STRICTER
+    # (a beam endpoint must sit closer to a wall to score well). The 0.10
+    # "floor" was a MAPPING constraint — while the map is still sparse a peaky
+    # model collapses all particle weights → divergence. In LOCALIZATION-ONLY
+    # (preloaded complete map) that risk is gone, so 0.06 makes the scan↔wall
+    # match noticeably tighter. Drop to 0.05 for stricter still; raise back
+    # toward 0.10 if the filter gets twitchy or loses lock. 240 beams; bump
+    # toward 360 for sharper localisation if the Jetson scan budget allows.
+    amcl_sigma_hit:             0.06
     amcl_max_scan_pts:          240
 
     # Adaptive recovery (§4.2): when n_eff collapses below this fraction the
@@ -74,19 +89,31 @@ slam_node:
     amcl_recovery_sigma_xy:     0.10
     amcl_recovery_sigma_theta:  0.08
 
-    # Coarse-to-fine yaw search in scan-to-map refine (§4.2) — the corner
-    # safety net that rescues turns where wheel-odom yaw drifted past the
-    # fine ICP gate. Sweep ±range in `step` increments, then fine ICP.
-    scan_to_map_coarse_range_deg: 6.0
-    scan_to_map_coarse_step_deg:  1.5
+    # ── Scan-to-map ICP REFINE — pulls the published pose onto the map walls
+    # after AMCL. IMPORTANT: this refine does NOT feed back into the AMCL
+    # particle belief; it's a per-scan polish whose correction is DISCARDED if
+    # it exceeds the caps below. So if AMCL drifts MORE than the cap, the scan
+    # can never be pulled back onto the walls (it floats off — the symptom you
+    # saw). The caps are raised here to give the refine authority to recover a
+    # larger drift; the coarse yaw sweep is widened to grab the walls.
+    scan_to_map_refine_enabled:     true
+    scan_to_map_radius:             4.0     # m — wall points considered around robot
+    scan_to_map_min_points:         80
+    scan_to_map_reject:             0.30    # m — ICP correspondence cutoff (smaller = stricter)
+    scan_to_map_max_correction:     0.30    # m   (was 0.15 — let refine pull further per scan)
+    scan_to_map_max_correction_deg: 15.0    # deg (was 8 — recover larger heading drift)
+    # Coarse yaw sweep before the fine ICP — rescues turns where wheel-odom yaw
+    # drifted past the fine gate. Sweep ±range in `step` increments.
+    scan_to_map_coarse_range_deg:   12.0    # was 6 — wider search to re-grab walls
+    scan_to_map_coarse_step_deg:    1.5
 
     # ── Scan-to-scan ICP odometry (robust rotation prior) ────────
     scan_match_odom_enabled:    true
     scan_match_max_fitness:     0.08    # m RMS — reject bad ICP fits
     scan_match_max_jump:        0.50    # m
     scan_match_reject:          0.40    # m — ICP correspondence cutoff
-    amcl_z_hit:                 0.85
-    amcl_z_rand:                0.15
+    amcl_z_hit:                 0.90    # trust real wall hits more (stricter match)
+    amcl_z_rand:                0.10    # less uniform tolerance for off-wall beams
     amcl_z_max_dist:            2.0
     amcl_neff_threshold_ratio:  0.5
     # CUDA particle scoring. Keep true on the dev box / if a GPU is present;

@@ -91,6 +91,91 @@ def drive_lifter(
         time.sleep(POLL_INTERVAL)
 
 
+def drive_for_time(
+    debug: DebugContext,
+    blackboard: Blackboard,
+    publish_cmd: Callable[[float, float], None],
+    v: float,
+    w: float,
+    duration: float,
+    *,
+    tag: str,
+) -> str:
+    """Open-loop drive at (v, w) for ``duration`` seconds, then stop.
+
+    Returns 'ok' | 'stop'. Honours abort/pause and always sends a zero command
+    on exit. Used by PICK for the timed forward-into-pallet and back-out moves.
+    """
+    deadline = time.monotonic() + duration
+    logger.info("[%s] drive v=%.3f w=%.3f for %.1fs", tag, v, w, duration)
+    try:
+        while time.monotonic() < deadline:
+            if debug.aborted:
+                return "stop"
+            debug.wait_if_paused()
+            publish_cmd(v, w)
+            time.sleep(POLL_INTERVAL)
+        return "ok"
+    finally:
+        publish_cmd(0.0, 0.0)
+
+
+def drive_until_stall(
+    debug: DebugContext,
+    blackboard: Blackboard,
+    publish_cmd: Callable[[float, float], None],
+    v: float,
+    w: float,
+    max_duration: float,
+    *,
+    grace: float,
+    stall_speed: float,
+    stall_ticks: int,
+    tag: str,
+) -> str:
+    """Drive at (v, w) until the wheels stall (robot blocked, e.g. pressed into
+    the pallet) OR ``max_duration`` s elapses, then stop.
+
+    Stall = wheel speed below ``stall_speed`` (rad/s, from blackboard['wheel_speed'])
+    for ``stall_ticks`` consecutive ticks, only checked after a ``grace`` spin-up
+    window so the initial ramp isn't mistaken for a stall. Returns 'stalled' |
+    'timeout' | 'stop'. Both 'stalled' and 'timeout' mean the move finished
+    normally — stalling against the pallet IS the success condition here, and
+    stopping at once protects the motor driver from a long stall-current draw.
+    """
+    t0 = time.monotonic()
+    deadline = t0 + max_duration
+    grace_until = t0 + grace
+    stalled = 0
+    logger.info("[%s] drive v=%.3f for <=%.1fs (stop on wheel stall < %.2f rad/s)",
+                tag, v, max_duration, stall_speed)
+    try:
+        while True:
+            if debug.aborted:
+                return "stop"
+            debug.wait_if_paused()
+            publish_cmd(v, w)
+
+            now = time.monotonic()
+            if now >= grace_until:
+                ws = bb_get(blackboard, "wheel_speed")
+                if ws is not None and abs(ws) < stall_speed:
+                    stalled += 1
+                    if stalled >= stall_ticks:
+                        logger.info("[%s] wheels stalled (%.2f rad/s) — blocked, "
+                                    "treating step as reached.", tag, ws)
+                        return "stalled"
+                else:
+                    stalled = 0
+
+            if now >= deadline:
+                logger.info("[%s] reached time limit %.1fs.", tag, max_duration)
+                return "timeout"
+            time.sleep(POLL_INTERVAL)
+    finally:
+        publish_cmd(0.0, 0.0)
+
+
 def run_alignment(
     debug: DebugContext,
     blackboard: Blackboard,

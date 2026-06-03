@@ -182,12 +182,17 @@ class DebuggableState(State):
         on_enter: Optional[Callable[[str], None]] = None,
         on_transition: Optional[Callable[[str, str], None]] = None,
         abort_outcome: Optional[str] = None,
+        clears_abort: bool = False,
     ) -> None:
         super().__init__(outcomes=outcomes)
         self._state_name = name
         self._debug = debug_ctx
         self._on_enter = on_enter
         self._on_transition = on_transition
+        # Terminal / idle "rest" states set this: on entry they consume a pending
+        # abort so the machine settles here instead of bouncing through the
+        # abort_outcome chain forever (IDLE→SEARCH→FAILED→IDLE→…).
+        self._clears_abort = clears_abort
         chosen_abort = abort_outcome or self.DEFAULT_ABORT_OUTCOME
         if chosen_abort not in outcomes:
             # Fall back to the first declared outcome if "stop" isn't valid.
@@ -205,6 +210,11 @@ class DebuggableState(State):
                 self._on_enter(self._state_name)
             except Exception:  # noqa: BLE001
                 logger.exception("on_enter hook raised")
+
+        # Rest states (IDLE / terminals) consume a pending abort on entry so the
+        # mission ends here and the machine waits, instead of looping.
+        if self._clears_abort and self._debug.aborted:
+            self._debug.set_abort(False)
 
         # Pre-state pause.
         self._debug.wait_if_paused()

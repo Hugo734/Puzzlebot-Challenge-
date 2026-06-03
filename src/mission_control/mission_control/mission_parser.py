@@ -34,7 +34,15 @@ import yaml
 
 
 # Mission JSON envelope: {"id", "type", ...}
-MISSION_TYPES = ("ROLLER_TO_TRUCK", "RACK_TO_TRUCK", "CUSTOM")
+#
+# SEARCH_ROLLERS / SEARCH_RACKS are "search only": drive the zone's candidates
+# looking for a pallet QR and STOP once one is found (no pick / nav / place).
+# They reuse the ROLLER/RACK search builder with search_only=True. Triggered by
+# the voice words "rollers" / "racks".
+MISSION_TYPES = (
+    "ROLLER_TO_TRUCK", "RACK_TO_TRUCK", "CUSTOM", "PICK_ONLY",
+    "SEARCH_ROLLERS", "SEARCH_RACKS",
+)
 
 # Lifter levels per zone class. Override per mission via pickup_level/place_level.
 # Racks are a single class now (the level is decided at mission time, not baked
@@ -157,6 +165,25 @@ def parse_mission(json_str: str, zones_data: dict) -> Optional[dict]:
             default_pickup=DEFAULT_PICKUP_LEVELS["racks"],
         )
 
+    if mtype == "SEARCH_ROLLERS":
+        return _build_search_mission(
+            data, zones, all_wps, mid,
+            zone_category="rollers",
+            default_pickup=DEFAULT_PICKUP_LEVELS["rollers"],
+            search_only=True,
+        )
+
+    if mtype == "SEARCH_RACKS":
+        return _build_search_mission(
+            data, zones, all_wps, mid,
+            zone_category="racks",
+            default_pickup=DEFAULT_PICKUP_LEVELS["racks"],
+            search_only=True,
+        )
+
+    if mtype == "PICK_ONLY":
+        return _build_pick_only_mission(data, mid)
+
     # CUSTOM
     return _build_custom_mission(data, all_wps, mid)
 
@@ -173,8 +200,15 @@ def _build_search_mission(
     *,
     zone_category: str,
     default_pickup: int,
+    search_only: bool = False,
 ) -> Optional[dict]:
-    """Common builder for ROLLER_TO_TRUCK / RACK_TO_TRUCK."""
+    """Common builder for ROLLER_TO_TRUCK / RACK_TO_TRUCK.
+
+    With ``search_only=True`` the mission stops once SEARCH locates a pallet
+    (SEARCH returns the ``done`` outcome → MISSION_DONE) instead of continuing
+    to PICK / NAV_TO_TRUCK / PLACE. Used by the SEARCH_ROLLERS / SEARCH_RACKS
+    voice commands.
+    """
     src = data.get("source", {})
     if not isinstance(src, dict):
         return None
@@ -213,6 +247,31 @@ def _build_search_mission(
         "pickup_level":    pickup_level,
         "place_level":     place_level,
         "skip_alignment":  bool(data.get("skip_alignment", False)),
+        "search_only":     search_only,
+    }
+
+
+def _build_pick_only_mission(data: dict, mid: str) -> Optional[dict]:
+    """PICK_ONLY: skip SEARCH/nav and pick the pallet right in front of the robot.
+
+    Used to test the PICK step in isolation — position the robot at a pallet,
+    then it aligns, approaches to the LiDAR target, and lifts. Ends after the
+    pick (no nav-to-truck / place). ``pick_only`` makes SEARCH short-circuit to
+    PICK and PICK finish to MISSION_DONE.
+    """
+    pickup_level = _coerce_level(data.get("pickup_level"), DEFAULT_PICKUP_LEVELS["rollers"])
+    if pickup_level is None:
+        return None
+    return {
+        "id":              mid,
+        "type":            "PICK_ONLY",
+        "candidate_queue": deque(),       # unused (SEARCH is skipped)
+        "scan_qr":         False,
+        "destination":     None,
+        "pickup_level":    pickup_level,
+        "place_level":     DEFAULT_PLACE_LEVEL_TRUCK,
+        "skip_alignment":  bool(data.get("skip_alignment", False)),
+        "pick_only":       True,
     }
 
 

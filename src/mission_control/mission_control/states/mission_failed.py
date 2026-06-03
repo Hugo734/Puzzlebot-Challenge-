@@ -29,7 +29,8 @@ class MissionFailed(DebuggableState):
         publish_alignment_start_fn: Optional[Callable[[bool], None]] = None,
         **kwargs,
     ) -> None:
-        super().__init__("MISSION_FAILED", ["ok"], debug_ctx, abort_outcome="ok", **kwargs)
+        super().__init__("MISSION_FAILED", ["ok"], debug_ctx, abort_outcome="ok",
+                         clears_abort=True, **kwargs)
         self._publish_goal = publish_goal_fn
         self._publish_align = publish_alignment_start_fn
 

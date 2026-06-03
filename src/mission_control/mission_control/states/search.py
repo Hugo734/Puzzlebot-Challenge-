@@ -37,6 +37,8 @@ class Search(DebuggableState):
     Outcomes:
         found     — a candidate was reached and a fresh QR payload was read
                     (or scan_qr is disabled and the candidate was reached).
+        done      — same success condition, but for a search_only mission
+                    (SEARCH_ROLLERS / SEARCH_RACKS): stop here, no pick/deliver.
         not_found — invalid mission, or every candidate exhausted with no QR.
         stop      — abort raised.
     """
@@ -49,7 +51,7 @@ class Search(DebuggableState):
         **kwargs,
     ) -> None:
         super().__init__(
-            "SEARCH", ["found", "not_found", "stop"], debug_ctx,
+            "SEARCH", ["found", "not_found", "stop", "done"], debug_ctx,
             abort_outcome="stop", **kwargs,
         )
         self._publish_goal = publish_goal_fn
@@ -62,6 +64,15 @@ class Search(DebuggableState):
         if mission is None:
             blackboard["mission_error_reason"] = "JSON failed to parse or violated schema."
             return "not_found"
+
+        # PICK_ONLY test: robot is already at the pallet — skip search/nav,
+        # go straight to PICK.
+        if mission.get("pick_only"):
+            blackboard["current_candidate"] = None
+            blackboard["qr_value"] = None
+            blackboard["resolved_dest"] = None
+            logger.info("[SEARCH] pick_only — skipping search, going straight to PICK.")
+            return "found"
 
         src_queue = mission.get("candidate_queue")
         if not src_queue:
@@ -76,6 +87,8 @@ class Search(DebuggableState):
         blackboard["qr_value"] = None
         blackboard["resolved_dest"] = mission.get("destination")
         scan_qr = bool(mission.get("scan_qr", True))
+        # SEARCH_ROLLERS / SEARCH_RACKS stop at the pallet instead of picking it.
+        success = "done" if mission.get("search_only") else "found"
 
         logger.info(
             "[SEARCH] Mission %s — searching %d candidate(s): %s",
@@ -101,10 +114,10 @@ class Search(DebuggableState):
             # Arrived. Look for a QR (unless this mission opts out of scanning).
             if not scan_qr:
                 logger.info("[SEARCH] scan_qr=false — accepting %s without QR.", candidate)
-                return "found"
+                return success
 
             if self._scan_qr_at(blackboard, candidate):
-                return "found"
+                return success
             if self._debug.aborted:
                 self._publish_goal("stop")
                 return "stop"

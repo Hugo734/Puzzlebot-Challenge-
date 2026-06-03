@@ -27,7 +27,7 @@ class Idle(DebuggableState):
     """
 
     def __init__(self, debug_ctx: DebugContext, zones_data: dict, **kwargs) -> None:
-        super().__init__("IDLE", ["mission_received"], debug_ctx, **kwargs)
+        super().__init__("IDLE", ["mission_received"], debug_ctx, clears_abort=True, **kwargs)
         self._zones = zones_data
 
     def run(self, blackboard: Blackboard) -> str:
@@ -47,7 +47,9 @@ class Idle(DebuggableState):
 
         while True:
             if self._debug.aborted:
-                return "mission_received"  # node handles abort externally
+                # A stop pressed while already idle: just consume it and keep
+                # waiting — do NOT advance to SEARCH.
+                self._debug.set_abort(False)
 
             self._debug.wait_if_paused()
 

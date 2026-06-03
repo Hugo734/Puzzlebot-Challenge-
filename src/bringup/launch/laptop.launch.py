@@ -54,8 +54,10 @@ def generate_launch_description():
     pkg_slam = get_package_share_directory('slam')
     pkg_nav  = get_package_share_directory('navigation')
     pkg_desc = get_package_share_directory('description')
+    pkg_perc = get_package_share_directory('perception')
 
-    nav_params_path  = os.path.join(pkg_nav,  'config', 'nav_params.yaml')
+    nav_params_path     = os.path.join(pkg_nav,  'config', 'nav_params.yaml')
+    camera_params_path  = os.path.join(pkg_perc, 'config', 'camera_params.yaml')
     rviz_cfg_path    = os.path.join(pkg_slam, 'config', 'slam.rviz')
     urdf_path        = os.path.join(pkg_desc, 'urdf', 'puzzlebot_with_lifter.urdf.xacro')
 
@@ -79,6 +81,19 @@ def generate_launch_description():
     rviz_arg = DeclareLaunchArgument(
         'rviz', default_value='true',
         description='Launch RViz2 with the SLAM config.')
+    qr_arg = DeclareLaunchArgument(
+        'qr', default_value='true',
+        description='Launch qr_quad_alignment (PICK docking + dashboard QR camera feed).')
+    qr_dry_run_arg = DeclareLaunchArgument(
+        'qr_dry_run', default_value='false',
+        description='Run qr_quad_alignment WITHOUT driving /cmd_vel_in '
+                    '(search-only testing; PICK docking needs false).')
+    qr_dock_dist_arg = DeclareLaunchArgument(
+        'qr_dock_dist', default_value='0.30',
+        description='DOCK stop distance to the QR in metres (height-agnostic). '
+                    'Default 0.30 = roller pallet (QR seen at ~295 mm when docked). '
+                    'Set 0.0 for legacy pixel-cy mode (the low rack QR). Read the '
+                    'live "d=..mm" in the dashboard QR feed to retune.')
 
     start_mode = LaunchConfiguration('start_mode')
     map_yaml   = LaunchConfiguration('map_yaml')
@@ -108,6 +123,28 @@ def generate_launch_description():
         package='dashboard', executable='dashboard_node', name='dashboard_node',
         parameters=[{'use_sim_time': False, 'start_mode': start_mode}],
         output='screen',
+    )
+
+    # ── QR docking / detection ────────────────────────────────────────
+    # Aligns onto the pallet QR (PICK) and publishes the annotated camera feed
+    # (/qr_quad_alignment/debug_image) that the dashboard shows. Subscribes to
+    # the Jetson camera (/video_source/raw) over DDS. show_window off (no cv2
+    # window on launch); the dashboard is the viewer. marker_length matches
+    # camera_params.yaml (0.05 m) for correct docking pose scale.
+    qr_node = Node(
+        package='perception', executable='qr_quad_alignment', name='qr_quad_alignment',
+        parameters=[{
+            'use_sim_time':        False,
+            'image_topic':         '/video_source/raw',
+            'camera_params':       camera_params_path,
+            'marker_length':       0.05,
+            'dry_run':             ParameterValue(LaunchConfiguration('qr_dry_run'), value_type=bool),
+            'show_window':         False,
+            'publish_debug_image': True,
+            'dock_target_dist':    ParameterValue(LaunchConfiguration('qr_dock_dist'), value_type=float),
+        }],
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('qr')),
     )
 
     # ── Voice control ─────────────────────────────────────────────────
@@ -147,13 +184,14 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        start_mode_arg, map_yaml_arg, rviz_arg,
+        start_mode_arg, map_yaml_arg, rviz_arg, qr_arg, qr_dry_run_arg, qr_dock_dist_arg,
         robot_state_publisher,
         joint_state_publisher,
         map_odom_relay,
         nav_node,
         mission_node,
         dashboard_node,
+        qr_node,
         voice_node,
         rviz_node,
     ])

@@ -12,8 +12,8 @@ const MAX_HISTORY     = 20;
 // turn 1.0) and are adjustable in ±10% steps with the on-screen +/- buttons or
 // the +/- keys, exactly like teleop_twist_keyboard. A full WASD press commands
 // `_teleopSpeed` m/s linear and `_teleopTurn` rad/s angular.
-let _teleopSpeed = 0.5;   // m/s  (linear)
-let _teleopTurn  = 1.0;   // rad/s (angular)
+let _teleopSpeed = 0.10;  // m/s  (linear)
+let _teleopTurn  = 0.21;  // rad/s (angular)
 const TELEOP_STEP_UP    = 1.1;   // +key → ×1.1 (≈ +10%)
 const TELEOP_STEP_DOWN  = 0.9;   // -key → ×0.9 (≈ -10%), matches teleop_twist_keyboard
 const TELEOP_MIN_SPEED  = 0.05;
@@ -378,6 +378,8 @@ function initQuickControl() {
     ?.addEventListener('click', () => _sendQuickMission('ROLLER_TO_TRUCK'));
   document.getElementById('btnMissionRacks')
     ?.addEventListener('click', () => _sendQuickMission('RACK_TO_TRUCK'));
+  document.getElementById('btnMissionPick')
+    ?.addEventListener('click', () => _sendQuickMission('PICK_ONLY'));
   document.getElementById('btnMissionAbort')?.addEventListener('click', () => {
     if (!confirm('¿Abortar la misión actual?')) return;
     _smControl({action: 'abort'});
@@ -1132,7 +1134,7 @@ let _voiceRecording = false;
 
 socket.on('voice_result', (data) => {
   if (data && data.word) {
-    _showVoiceResult(data.word);
+    _showVoiceResult(data.word, data.action);
   }
 });
 
@@ -1238,27 +1240,105 @@ async function _sendAudio() {
     return;
   }
 
-  const blob = new Blob(_audioChunks, {type: _mediaRecorder?.mimeType || 'audio/webm'});
+  const mime = _mediaRecorder?.mimeType || 'audio/webm';
+  const blob = new Blob(_audioChunks, {type: mime});
+
+  // Decode + resample to a 16 kHz mono 16-bit PCM WAV right here in the
+  // browser. That way the backend only needs scipy to read it — no pydub or
+  // ffmpeg on the server, which is what was failing ("Could not decode
+  // audio"). If WebAudio decoding is unavailable we ship the raw container
+  // and let the server fall back to pydub.
   const form = new FormData();
-  form.append('audio', blob, 'recording.webm');
+  try {
+    const wav = await _blobToWav16k(blob);
+    form.append('audio', wav, 'recording.wav');
+  } catch (err) {
+    console.warn('[voice] client-side WAV encode failed, sending raw blob:', err);
+    form.append('audio', blob, 'recording.webm');
+  }
 
   try {
     const res  = await fetch('/api/voice', {method: 'POST', body: form});
     const json = await res.json();
 
     if (res.ok && json.word) {
-      _showVoiceResult(json.word);
+      _showVoiceResult(json.word, json.action);
     } else {
-      _setVoiceStatus('error', 'Error: ' + (json.error || 'unknown'));
+      const msg = json.error + (json.reason ? ' — ' + json.reason : '');
+      _setVoiceStatus('error', 'Error: ' + (msg || 'unknown'));
     }
   } catch (err) {
     _setVoiceStatus('error', 'Network error: ' + err.message);
   }
 }
 
-function _showVoiceResult(word) {
+// Decode any browser-recorded audio blob (webm/opus, ogg, …) into a
+// 16 kHz mono 16-bit PCM WAV Blob using the WebAudio API.
+async function _blobToWav16k(blob) {
+  const arrayBuf = await blob.arrayBuffer();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) throw new Error('AudioContext unavailable');
+
+  const ctx = new AC();
+  let decoded;
+  try {
+    // Promise form; some Safari builds need the callback form, handled below.
+    decoded = await new Promise((resolve, reject) => {
+      const p = ctx.decodeAudioData(arrayBuf, resolve, reject);
+      if (p && typeof p.then === 'function') p.then(resolve, reject);
+    });
+  } finally {
+    if (ctx.close) ctx.close();
+  }
+
+  // Resample to 16 kHz mono through an OfflineAudioContext.
+  const targetRate = 16000;
+  const frames = Math.max(1, Math.ceil(decoded.duration * targetRate));
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const off = new OAC(1, frames, targetRate);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start();
+  const rendered = await off.startRendering();
+  return _encodeWav16(rendered.getChannelData(0), targetRate);
+}
+
+// Float32 samples in [-1, 1] → mono 16-bit PCM WAV Blob.
+function _encodeWav16(samples, sampleRate) {
+  const n = samples.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const view = new DataView(buf);
+  const writeStr = (off, s) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + n * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);            // PCM fmt chunk size
+  view.setUint16(20, 1, true);             // format = PCM
+  view.setUint16(22, 1, true);             // channels = 1
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate (mono, 16-bit)
+  view.setUint16(32, 2, true);             // block align
+  view.setUint16(34, 16, true);            // bits per sample
+  writeStr(36, 'data');
+  view.setUint32(40, n * 2, true);
+
+  let off = 44;
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    off += 2;
+  }
+  return new Blob([view], {type: 'audio/wav'});
+}
+
+function _showVoiceResult(word, action) {
   setText('voiceResultWord', word);
-  _setVoiceStatus('done', 'Sent: ' + word);
+  _setVoiceStatus('done', 'Sent: ' + word + _voiceActionLabel(action));
 
   // History
   const list = document.getElementById('voiceHistoryList');
@@ -1266,12 +1346,21 @@ function _showVoiceResult(word) {
     list.querySelector('.dim')?.remove();
     const li = document.createElement('li');
     li.className   = 'history-item';
-    li.textContent = word + '  ' + new Date().toLocaleTimeString();
+    li.textContent = word + _voiceActionLabel(action) + '  ' + new Date().toLocaleTimeString();
     list.insertBefore(li, list.firstChild);
     while (list.children.length > MAX_HISTORY) list.removeChild(list.lastChild);
   }
 
   setTimeout(() => _setVoiceStatus('', 'Ready'), 3000);
+}
+
+// Short human label for the robot action a voice word triggered (if any).
+function _voiceActionLabel(action) {
+  if (!action || !action.kind) return '';
+  if (action.kind === 'teleop')  return ` → drive ${action.duration}s`;
+  if (action.kind === 'mission') return ` → ${action.type}`;
+  if (action.kind === 'ignored') return ` → ignored (${action.reason})`;
+  return '';
 }
 
 function _setVoiceStatus(cls, text) {
@@ -1345,6 +1434,15 @@ async function _smControl(payload) {
 
 function _renderSmSnapshot(snap) {
   if (!snap) return;
+  // Drive the main state badge from the snapshot too (published at 2 Hz, and on
+  // connect) so it shows the real SM state immediately — /robot_state is
+  // volatile and only fires on a state CHANGE, leaving a late dashboard stuck
+  // on UNKNOWN until the next transition.
+  const badge = document.getElementById('stateBadge');
+  if (badge && snap.state) {
+    badge.textContent = snap.state;
+    badge.className   = 'state-badge ' + snap.state;
+  }
   setText('smCurrentState',     snap.state || '—');
   setText('smMissionId',        snap.mission_id || '—');
   setText('smMissionType',      snap.mission_type || '—');

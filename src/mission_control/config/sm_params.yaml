@@ -21,3 +21,23 @@ state_machine_node:
     # running until /sm/control receives {"action": "step"}). Useful for
     # supervised first runs.
     debug_step_mode_default: false
+
+    # ── PICK (timed open-loop maneuver) ──────────────────────────────
+    # After QR docking: lift to entry_level, drive forward forward_time s to
+    # slide the forks under the pallet, change to lift_level to take its weight,
+    # then reverse reverse_time s to pull it clear.
+    pick_approach_speed:  0.04    # m/s — slow CREEP into the pallet (no slam, no wheel slip)
+    pick_forward_time:    9.0     # s max (creep is slow; the stall guard ends it on contact)
+    pick_reverse_time:    10.0    # s backing out with the pallet
+    pick_entry_level:     1       # fork height to slide under the pallet
+    pick_lift_level:      0       # height to lift the pallet (per hardware: 0 = lift)
+    # Stall detection on the forward move: stop the instant the wheels can't turn
+    # (blocked by the pallet) so the driver doesn't draw stall current. Wheel
+    # speed from /wl,/wr (rad/s); at 0.10 m/s the wheels spin ~2 rad/s.
+    pick_stall_grace:     1.0     # s spin-up before stall is checked
+    pick_stall_speed:     0.4     # rad/s — wheel speed below this = stalled
+    pick_stall_ticks:     3       # consecutive ticks (~0.3 s) to confirm a stall
+    # Front-distance TELEMETRY only (shown in the dashboard; does NOT gate PICK).
+    pick_front_arc_deg:   12.0    # half-angle of the "front" arc sampled from /scan
+    laser_yaw_offset_deg: 180.0   # LiDAR mount yaw (rear-mounted on the real robot)
+    pick_front_min_range: 0.12    # ignore nearer returns (robot self/forks/noise)

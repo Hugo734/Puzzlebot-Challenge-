@@ -45,10 +45,11 @@ from collections import deque
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 
-from geometry_msgs.msg import Point
-from std_msgs.msg import Bool, String, UInt8
+from geometry_msgs.msg import Point, Twist
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool, Float32, String, UInt8
 
 from yasmin import Blackboard, StateMachine
 
@@ -87,6 +88,27 @@ class StateMachineNode(Node):
         self.declare_parameter("alignment_timeout", 30.0)
         self.declare_parameter("lifter_timeout", 8.0)
         self.declare_parameter("debug_step_mode_default", False)
+        # ── PICK (timed open-loop maneuver) ────────────────────────────────
+        # After QR docking: lift to entry_level, drive forward forward_time s to
+        # slide the forks under the pallet, change to lift_level to take its
+        # weight, then reverse reverse_time s to pull it clear.
+        self.declare_parameter("pick_approach_speed", 0.10)    # m/s forward & reverse
+        self.declare_parameter("pick_forward_time", 5.0)       # s driving into the pallet
+        self.declare_parameter("pick_reverse_time", 10.0)      # s backing out
+        self.declare_parameter("pick_entry_level", 1)          # fork height to enter
+        self.declare_parameter("pick_lift_level", 0)           # height to lift the pallet
+        # Stall detection for the forward-into-pallet move: stop the instant the
+        # wheels can't turn (robot blocked by the pallet) so the motor driver
+        # isn't left drawing stall current. Stall = wheel speed (/wl,/wr rad/s)
+        # below pick_stall_speed for pick_stall_ticks ticks, after a spin-up grace.
+        self.declare_parameter("pick_stall_grace", 1.0)        # s spin-up before checking
+        self.declare_parameter("pick_stall_speed", 0.4)        # rad/s — below = stalled
+        self.declare_parameter("pick_stall_ticks", 3)          # consecutive ticks to confirm
+        # Front-distance TELEMETRY only (shown in the dashboard; does NOT gate
+        # the timed maneuver). Front arc + LiDAR mount yaw select the front rays.
+        self.declare_parameter("pick_front_arc_deg", 12.0)
+        self.declare_parameter("laser_yaw_offset_deg", 180.0)  # rear-mounted LiDAR
+        self.declare_parameter("pick_front_min_range", 0.12)
 
         zones_path = str(self.get_parameter("zones_file").value)
         if not zones_path:
@@ -118,6 +140,19 @@ class StateMachineNode(Node):
         lifter_timeout    = float(self.get_parameter("lifter_timeout").value)
         step_default      = bool(self.get_parameter("debug_step_mode_default").value)
 
+        import math as _math
+        pick_approach_speed    = float(self.get_parameter("pick_approach_speed").value)
+        pick_forward_time      = float(self.get_parameter("pick_forward_time").value)
+        pick_reverse_time      = float(self.get_parameter("pick_reverse_time").value)
+        pick_entry_level       = int(self.get_parameter("pick_entry_level").value)
+        pick_lift_level        = int(self.get_parameter("pick_lift_level").value)
+        pick_stall_grace       = float(self.get_parameter("pick_stall_grace").value)
+        pick_stall_speed       = float(self.get_parameter("pick_stall_speed").value)
+        pick_stall_ticks       = int(self.get_parameter("pick_stall_ticks").value)
+        self._pick_front_arc   = _math.radians(float(self.get_parameter("pick_front_arc_deg").value))
+        self._laser_yaw_offset = _math.radians(float(self.get_parameter("laser_yaw_offset_deg").value))
+        self._pick_front_min_range = float(self.get_parameter("pick_front_min_range").value)
+
         # ── Shared state ──────────────────────────────────────────────────
         self._blackboard = Blackboard()
         self._init_blackboard()
@@ -137,8 +172,16 @@ class StateMachineNode(Node):
         self.create_subscription(UInt8,  "/lifter_status",    self._cb_lifter_status,  qos)
         self.create_subscription(String, "/voice_command",    self._cb_voice,          qos)
         self.create_subscription(String, "/sm/control",       self._cb_sm_control,     qos)
+        # /scan for the PICK forward-approach (best-effort sensor QoS).
+        self.create_subscription(LaserScan, "/scan", self._cb_scan, qos_profile_sensor_data)
+        # Wheel encoder speeds (rad/s) → stall detection during the PICK forward.
+        self._wl = 0.0
+        self._wr = 0.0
+        self.create_subscription(Float32, "/wl", self._cb_wl, qos_profile_sensor_data)
+        self.create_subscription(Float32, "/wr", self._cb_wr, qos_profile_sensor_data)
 
         self._pub_goal       = self.create_publisher(String, "/goal_waypoint",   qos)
+        self._pub_cmd        = self.create_publisher(Twist,  "/cmd_vel_in",      qos)
         self._pub_lifter     = self.create_publisher(UInt8,  "/lifter_level",    qos)
         self._pub_align      = self.create_publisher(Bool,   "/alignment_start", qos)
         self._pub_state      = self.create_publisher(String, "/robot_state",     qos)
@@ -150,6 +193,14 @@ class StateMachineNode(Node):
             scan_qr_timeout=scan_qr_timeout,
             alignment_timeout=alignment_timeout,
             lifter_timeout=lifter_timeout,
+            pick_approach_speed=pick_approach_speed,
+            pick_forward_time=pick_forward_time,
+            pick_reverse_time=pick_reverse_time,
+            pick_entry_level=pick_entry_level,
+            pick_lift_level=pick_lift_level,
+            pick_stall_grace=pick_stall_grace,
+            pick_stall_speed=pick_stall_speed,
+            pick_stall_ticks=pick_stall_ticks,
         )
         self._sm.set_start_state("IDLE")
 
@@ -181,6 +232,8 @@ class StateMachineNode(Node):
         bb["lifter_status"]       = None
         bb["voice_command"]       = None
         bb["mission_error_reason"] = None
+        bb["front_distance"]       = None    # min front-arc LiDAR range (m), telemetry
+        bb["wheel_speed"]          = None    # max |wheel| rad/s, for PICK stall detection
 
     # ------------------------------------------------------------------ waypoints
     @staticmethod
@@ -230,6 +283,37 @@ class StateMachineNode(Node):
     def _cb_lifter_status(self, msg: UInt8) -> None:
         self._blackboard["lifter_status"] = int(msg.data)
 
+    def _cb_scan(self, msg: LaserScan) -> None:
+        """Min valid range in the front arc (base_link forward) for PICK approach.
+
+        Each ray bearing is brought into base_link with the LiDAR mount yaw
+        (rear-mounted → 180°), then only rays within ±front_arc of straight-ahead
+        and within [range_min, range_max] are considered. None if no valid ray.
+        """
+        import math
+        angle = msg.angle_min
+        # Floor out very-near returns (robot's own structure / forks / noise) so
+        # the front distance reflects the pallet, not the robot itself.
+        floor = max(msg.range_min, self._pick_front_min_range)
+        rmax = msg.range_max
+        arc, yaw = self._pick_front_arc, self._laser_yaw_offset
+        best = None
+        for r in msg.ranges:
+            aw = math.atan2(math.sin(angle + yaw), math.cos(angle + yaw))
+            if -arc <= aw <= arc and floor < r < rmax:
+                if best is None or r < best:
+                    best = r
+            angle += msg.angle_increment
+        self._blackboard["front_distance"] = best
+
+    def _cb_wl(self, msg: Float32) -> None:
+        self._wl = float(msg.data)
+        self._blackboard["wheel_speed"] = max(abs(self._wl), abs(self._wr))
+
+    def _cb_wr(self, msg: Float32) -> None:
+        self._wr = float(msg.data)
+        self._blackboard["wheel_speed"] = max(abs(self._wl), abs(self._wr))
+
     def _cb_voice(self, msg: String) -> None:
         cmd = msg.data.strip().lower()
         self._blackboard["voice_command"] = cmd
@@ -271,6 +355,11 @@ class StateMachineNode(Node):
     def _publish_goal(self, waypoint_name: str) -> None:
         m = String(); m.data = waypoint_name
         self._pub_goal.publish(m)
+
+    def _publish_cmd(self, v: float, w: float) -> None:
+        """Drive command for the PICK forward-approach (→ /cmd_vel_in)."""
+        m = Twist(); m.linear.x = float(v); m.angular.z = float(w)
+        self._pub_cmd.publish(m)
 
     def _publish_lifter(self, level: int) -> None:
         m = UInt8(); m.data = max(0, min(7, int(level)))
@@ -318,6 +407,8 @@ class StateMachineNode(Node):
             "alignment_error":    None if ae is None else {"x": ae.x, "y": ae.y, "z": ae.z},
             "lifter_status":      bb.get("lifter_status"),
             "voice_command":      bb.get("voice_command"),
+            "front_distance":     bb.get("front_distance"),   # min front-arc LiDAR range (m)
+            "wheel_speed":        bb.get("wheel_speed"),      # max |wheel| rad/s (stall sense)
             "mission_error_reason": bb.get("mission_error_reason"),
             "debug":              self._debug.snapshot(),
         }
@@ -328,6 +419,14 @@ class StateMachineNode(Node):
         scan_qr_timeout: float,
         alignment_timeout: float,
         lifter_timeout: float,
+        pick_approach_speed: float,
+        pick_forward_time: float,
+        pick_reverse_time: float,
+        pick_entry_level: int,
+        pick_lift_level: int,
+        pick_stall_grace: float,
+        pick_stall_speed: float,
+        pick_stall_ticks: int,
     ) -> StateMachine:
         sm = StateMachine(outcomes=["finish"])
         kw = dict(
@@ -346,6 +445,7 @@ class StateMachineNode(Node):
             Search(self._debug, self._publish_goal, scan_qr_timeout, **kw),
             transitions={
                 "found":     "PICK",
+                "done":      "MISSION_DONE",   # SEARCH_ROLLERS / SEARCH_RACKS: stop after finding
                 "not_found": "MISSION_FAILED",
                 "stop":      "MISSION_FAILED",
             },
@@ -354,9 +454,13 @@ class StateMachineNode(Node):
         sm.add_state(
             "PICK",
             Pick(self._debug, self._publish_alignment_start, self._publish_lifter,
-                 alignment_timeout, lifter_timeout, **kw),
+                 self._publish_cmd, alignment_timeout, lifter_timeout,
+                 pick_approach_speed, pick_forward_time, pick_reverse_time,
+                 pick_entry_level, pick_lift_level,
+                 pick_stall_grace, pick_stall_speed, pick_stall_ticks, **kw),
             transitions={
                 "picked": "NAV_TO_TRUCK",
+                "done":   "MISSION_DONE",     # PICK_ONLY test ends here
                 "failed": "MISSION_FAILED",
                 "stop":   "MISSION_FAILED",
             },

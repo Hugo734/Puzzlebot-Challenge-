@@ -16,7 +16,8 @@ class MissionDone(DebuggableState):
     """Publish a success record then return to IDLE."""
 
     def __init__(self, debug_ctx: DebugContext, **kwargs) -> None:
-        super().__init__("MISSION_DONE", ["ok"], debug_ctx, abort_outcome="ok", **kwargs)
+        super().__init__("MISSION_DONE", ["ok"], debug_ctx, abort_outcome="ok",
+                         clears_abort=True, **kwargs)
 
     def run(self, blackboard: Blackboard) -> str:
         mission = bb_get(blackboard, "current_mission") or {}

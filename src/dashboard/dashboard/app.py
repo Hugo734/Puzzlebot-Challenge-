@@ -65,7 +65,33 @@ def _get_hmm_recognizer():
 # Mission validation — types accepted by mission_control's parser.
 # ---------------------------------------------------------------------------
 
-VALID_MISSION_TYPES = {"ROLLER_TO_TRUCK", "RACK_TO_TRUCK", "CUSTOM"}
+VALID_MISSION_TYPES = {
+    "ROLLER_TO_TRUCK", "RACK_TO_TRUCK", "CUSTOM", "PICK_ONLY",
+    "SEARCH_ROLLERS", "SEARCH_RACKS",
+}
+
+# ---------------------------------------------------------------------------
+# Voice-command → robot action map.
+#
+# The recognizer publishes a single lowercased word on /voice_command (still
+# done below for the SM's pause/stop handling + the voice history). On top of
+# that, these words drive the robot directly from the dashboard:
+#   forward/left/right → a short timed teleop nudge (only while the SM is IDLE)
+#   racks/rollers      → a SEARCH-only mission (drive the zone, stop at the pallet)
+# map/one/two/continue/stop are intentionally NOT mapped yet (passthrough only).
+# ---------------------------------------------------------------------------
+
+_VOICE_TELEOP_LINEAR = 0.10   # m/s  (matches the teleop default speed)
+_VOICE_TELEOP_ANGULAR = 0.21  # rad/s (matches the teleop default turn)
+_VOICE_TELEOP_DURATION = 2.0  # s
+
+VOICE_ACTIONS = {
+    "forward": {"kind": "teleop", "linear":  _VOICE_TELEOP_LINEAR, "angular": 0.0},
+    "left":    {"kind": "teleop", "linear": 0.0, "angular":  _VOICE_TELEOP_ANGULAR},
+    "right":   {"kind": "teleop", "linear": 0.0, "angular": -_VOICE_TELEOP_ANGULAR},
+    "racks":   {"kind": "mission", "type": "SEARCH_RACKS"},
+    "rollers": {"kind": "mission", "type": "SEARCH_ROLLERS"},
+}
 
 # ---------------------------------------------------------------------------
 # Teleop watchdog state
@@ -97,6 +123,73 @@ def _teleop_watchdog() -> None:
 # Start watchdog thread eagerly (daemon, won't block shutdown)
 _watchdog_thread = threading.Thread(target=_teleop_watchdog, daemon=True)
 _watchdog_thread.start()
+
+
+def _drive_timed(linear: float, angular: float, duration: float) -> None:
+    """Drive at (linear, angular) for `duration` seconds, then stop.
+
+    The velocity smoother (twist_relay) holds the last command forever, so a
+    single publish would never stop on its own. We re-publish at 20 Hz and keep
+    feeding the teleop watchdog (_last_teleop_time / _teleop_active) so it acts
+    as the safety net: if this thread dies mid-move, the watchdog stops the
+    robot 0.35 s later. At the end we send an explicit 0,0.
+    """
+    def _run() -> None:
+        global _last_teleop_time, _teleop_active
+        end = time.monotonic() + duration
+        while time.monotonic() < end:
+            if ros_bridge is None:
+                break
+            try:
+                ros_bridge.publish_cmd_vel(linear, angular)
+            except Exception:  # noqa: BLE001
+                break
+            with _teleop_lock:
+                _last_teleop_time = time.monotonic()
+                _teleop_active = True
+            time.sleep(0.05)
+        if ros_bridge is not None:
+            try:
+                ros_bridge.publish_cmd_vel(0.0, 0.0)
+            except Exception:  # noqa: BLE001
+                pass
+        with _teleop_lock:
+            _teleop_active = False
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _dispatch_voice_action(word: str) -> Optional[dict]:
+    """Run the robot action bound to a recognized voice word, if any.
+
+    Returns a small dict describing what happened (for the UI), or None when
+    the word has no bound action (map/one/two/continue/stop → passthrough).
+    """
+    action = VOICE_ACTIONS.get(word)
+    if action is None or ros_bridge is None:
+        return None
+
+    if action["kind"] == "teleop":
+        # Only nudge the robot when it isn't running an autonomous mission,
+        # otherwise voice teleop and the SM fight over /cmd_vel_in.
+        try:
+            sm_state = (ros_bridge.get_state().state or "").upper()
+        except Exception:  # noqa: BLE001
+            sm_state = ""
+        if sm_state not in ("", "IDLE", "UNKNOWN"):
+            return {"kind": "ignored", "reason": f"busy: {sm_state}"}
+        _drive_timed(action["linear"], action["angular"], _VOICE_TELEOP_DURATION)
+        return {"kind": "teleop", "duration": _VOICE_TELEOP_DURATION}
+
+    if action["kind"] == "mission":
+        # SEARCH-only mission; the SM ignores it if one is already running.
+        try:
+            ros_bridge.publish_mission(json.dumps({"type": action["type"]}))
+        except Exception:  # noqa: BLE001
+            return None
+        return {"kind": "mission", "type": action["type"]}
+
+    return None
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -136,8 +229,8 @@ def get_state():
 # dropdown and by the server to reject malformed requests.
 _SM_OUTCOMES = {
     "IDLE":           ["mission_received"],
-    "SEARCH":         ["found", "not_found", "stop"],
-    "PICK":           ["picked", "failed", "stop"],
+    "SEARCH":         ["found", "done", "not_found", "stop"],
+    "PICK":           ["picked", "done", "failed", "stop"],
     "NAV_TO_TRUCK":   ["arrived", "failed", "stop"],
     "PLACE":          ["placed", "failed", "stop"],
     "MISSION_DONE":   ["ok"],
@@ -519,10 +612,20 @@ def voice_command():
     except Exception:  # noqa: BLE001
         pass
 
-    # Fallback: pydub (handles webm, ogg, mp3…)
+    # Fallback: pydub (handles webm/ogg/mp3 via ffmpeg). The browser normally
+    # decodes to a 16 kHz WAV client-side, so this only runs for raw/direct
+    # posts or browsers without WebAudio. We surface the real reason because a
+    # swallowed exception here ("Could not decode audio") was impossible to
+    # debug — the usual culprit is a missing ffmpeg or pydub at runtime.
     if signal is None:
         try:
+            import shutil
             from pydub import AudioSegment
+            if shutil.which("ffmpeg") is None and shutil.which("avconv") is None:
+                raise RuntimeError(
+                    "ffmpeg not found on PATH (apt install ffmpeg). The dashboard "
+                    "normally decodes audio in the browser, so update the web UI too."
+                )
             seg = (
                 AudioSegment.from_file(io.BytesIO(raw))
                 .set_channels(1)
@@ -532,8 +635,16 @@ def voice_command():
             arr /= 2 ** (seg.sample_width * 8 - 1)
             signal = arr
             fs_in  = 16000
-        except Exception:  # noqa: BLE001
-            return jsonify({"error": "Could not decode audio (WAV or WebM/pydub required)"}), 400
+        except Exception as exc:  # noqa: BLE001
+            reason = f"{type(exc).__name__}: {exc}"
+            print(
+                f"[dashboard] /api/voice decode failed "
+                f"({len(raw)} bytes, ct={content_type!r}, name={fname!r}): {reason}"
+            )
+            return jsonify({
+                "error": "Could not decode audio",
+                "reason": reason,
+            }), 400
 
     # Resample if needed
     if fs_in != 16000:
@@ -549,14 +660,18 @@ def voice_command():
         return jsonify({"error": "Recognition failed"}), 500
 
     # ── Publish to ROS2 ───────────────────────────────────────────
+    # Always publish the raw word (voice history + the SM's pause/stop handling).
     if ros_bridge is not None:
         try:
             ros_bridge.publish_voice_command(word)
         except Exception:  # noqa: BLE001
             pass
 
-    socketio.emit("voice_result", {"word": word})
-    return jsonify({"word": word})
+    # ── Drive the robot from the word (teleop nudge / SEARCH mission) ──
+    action = _dispatch_voice_action(word)
+
+    socketio.emit("voice_result", {"word": word, "action": action})
+    return jsonify({"word": word, "action": action})
 
 
 @app.route("/api/voice/status")

@@ -100,10 +100,11 @@ class RosBridge:
         self._node.create_subscription(
             UInt8, "/lifter_status", self._cb_lifter, best_effort_qos
         )
-        # Camera topic is configurable: the real robot typically publishes
-        # /video_source/raw, while Gazebo sim uses /mast_camera/image_raw.
-        # Default targets the real camera; override with the `camera_topic` param.
-        self._node.declare_parameter("camera_topic", "/video_source/raw")
+        # Camera topic is configurable. Default = the QR detector's annotated
+        # stream (/qr_quad_alignment/debug_image), so the dashboard shows live
+        # QR detection + pose overlay. For the raw camera instead, set
+        # camera_topic:=/video_source/raw (real robot) or /mast_camera/image_raw (sim).
+        self._node.declare_parameter("camera_topic", "/qr_quad_alignment/debug_image")
         camera_topic = str(self._node.get_parameter("camera_topic").value)
         self._node.get_logger().info(f"Camera feed subscribed on {camera_topic}")
         self._node.create_subscription(

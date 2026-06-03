@@ -154,12 +154,32 @@ class QRQuadAlignmentNode(Node):
         # Ticks consecutivos centrados para confirmar DONE (a 10 Hz: 3 ~ 0.3s).
         self.declare_parameter('dock_done_stable_ticks', 3)
 
+        # ---- DOCK forward criterion: DISTANCE mode (height-agnostic) ----
+        # The pixel-cy criterion above only converges when the QR is BELOW the
+        # camera axis (e.g. rack, low). For a QR ABOVE the axis (roller, high)
+        # the QR rises in the image as we approach, so cy never reaches the
+        # bottom target. dock_target_dist > 0 switches the forward axis to use
+        # the measured QR distance (dist_qr) instead: advance until dist_qr <=
+        # dock_target_dist. Works for any QR height. 0.0 = keep pixel-cy mode.
+        self.declare_parameter('dock_target_dist', 0.0)   # m (0 = pixel-cy mode)
+        self.declare_parameter('dock_dist_tol', 0.03)     # m tolerance for DONE
+        self.declare_parameter('kp_v_dock_dist', 0.30)    # m/s per m of distance error
+        # Losing the QR while already centred + near the target means we closed
+        # in enough that the marker left the frame — that's a successful dock,
+        # not a "search". After this many consecutive centred ticks, a QR loss
+        # is treated as DONE (if also within dock_lost_margin of the target).
+        self.declare_parameter('dock_lost_ticks', 2)
+        self.declare_parameter('dock_lost_margin', 0.10)  # m extra distance allowed
+
         # ---- Vision / safety ----
         self.declare_parameter('detection_max_age_s', 3.0)
         self.declare_parameter('control_freq', 10.0)
         self.declare_parameter('dry_run', False)
         self.declare_parameter('auto_start', False)
         self.declare_parameter('show_window', True)
+        # Publish the annotated frame (QR detection + pose + state) so the web
+        # dashboard can show it. Headless-friendly (no cv2 window required).
+        self.declare_parameter('publish_debug_image', True)
         self.declare_parameter('frame_id', 'camera_link')
 
         # ---- Leer ----
@@ -190,6 +210,12 @@ class QRQuadAlignmentNode(Node):
         self._kp_w_dock_px  = float(self.get_parameter('kp_w_dock_px').value)
         self._w_max         = float(self.get_parameter('w_max').value)
         self._dock_stable_n = int(self.get_parameter('dock_done_stable_ticks').value)
+        self._dock_target_dist = float(self.get_parameter('dock_target_dist').value)
+        self._dock_dist_tol    = float(self.get_parameter('dock_dist_tol').value)
+        self._kp_v_dock_dist   = float(self.get_parameter('kp_v_dock_dist').value)
+        self._dock_lost_ticks  = int(self.get_parameter('dock_lost_ticks').value)
+        self._dock_lost_margin = float(self.get_parameter('dock_lost_margin').value)
+        self._centered_count   = 0
         self._dock_stable_count: int = 0
 
         self._max_det_age   = float(self.get_parameter('detection_max_age_s').value)
@@ -197,6 +223,7 @@ class QRQuadAlignmentNode(Node):
         self._dry_run       = bool(self.get_parameter('dry_run').value)
         self._auto_start    = bool(self.get_parameter('auto_start').value)
         self._show_window   = bool(self.get_parameter('show_window').value)
+        self._publish_debug_image = bool(self.get_parameter('publish_debug_image').value)
         self._frame_id      = str(self.get_parameter('frame_id').value)
 
         # ---- Calibracion ----
@@ -247,6 +274,8 @@ class QRQuadAlignmentNode(Node):
         # pallet the robot is in front of. Only payloads that decoded
         # successfully are published (empty strings are dropped).
         self._pub_qr_id = self.create_publisher(String, '/qr_detected', 10)
+        # Annotated debug image for the web dashboard camera view.
+        self._pub_debug_img = self.create_publisher(Image, '/qr_quad_alignment/debug_image', 10)
 
         # ---- Odometria ----
         self._odom = OdometryTracker(
@@ -486,6 +515,14 @@ class QRQuadAlignmentNode(Node):
         )
         self._set_state(State.ROTATE, reason='inicia rotacion 90°')
 
+    def _near_target(self, g: dict) -> bool:
+        """Whether the (possibly stale) geometry is within ~the dock target —
+        used to decide if a QR loss means 'docked' rather than 'lost'."""
+        if self._dock_target_dist > 0.0:
+            return g['dist_qr'] <= self._dock_target_dist + self._dock_lost_margin
+        # pixel-cy mode: QR has descended close to / past the target row
+        return (g['cy_px'] - self._target_cy_px) >= -(self._tol_cy_px * 3.0)
+
     def _run_dock(self) -> None:
         """DOCK pixel-space con v y w SIMULTANEOS.
 
@@ -504,6 +541,18 @@ class QRQuadAlignmentNode(Node):
         # queda al lado derecho del nuevo heading -> buscar girando a la
         # derecha (search_dir=-1).
         if not (self._is_detection_fresh() and self._geom_latest is not None):
+            # Lost the QR. If we were already centred and near the target, we
+            # lost it BECAUSE we closed in (marker left the frame) → docked, DONE.
+            g_last = self._geom_latest
+            if (g_last is not None and self._centered_count >= self._dock_lost_ticks
+                    and self._near_target(g_last)):
+                self._set_state(
+                    State.DONE,
+                    reason=f'QR lost while docked (centered x{self._centered_count}, '
+                           f'd={g_last["dist_qr"]*1000:.0f}mm)')
+                self._centered_count = 0
+                return
+            # Genuinely lost → search by turning toward the last known side.
             if self._plan_alpha != 0.0:
                 search_dir = -math.copysign(1.0, self._plan_alpha)
             else:
@@ -511,6 +560,7 @@ class QRQuadAlignmentNode(Node):
                     self._last_search_dir = +1.0
                 search_dir = self._last_search_dir
             self._dock_stable_count = 0
+            self._centered_count = 0
             self._publish_cmd(0.0, 0.12 * search_dir)
             return
 
@@ -522,10 +572,17 @@ class QRQuadAlignmentNode(Node):
         self._last_search_dir = -1.0 if err_cx >= 0 else +1.0
 
         cx_in_tol = abs(err_cx) < self._tol_cx_px
-        cy_in_tol = err_cy >= -self._tol_cy_px   # llegamos o pasamos
+        self._centered_count = self._centered_count + 1 if cx_in_tol else 0
+        # Forward axis: DISTANCE mode (height-agnostic) vs pixel-cy mode.
+        if self._dock_target_dist > 0.0:
+            dist_err = g['dist_qr'] - self._dock_target_dist
+            fwd_in_tol = dist_err <= self._dock_dist_tol      # close enough
+        else:
+            dist_err = 0.0
+            fwd_in_tol = err_cy >= -self._tol_cy_px           # cy: llegamos o pasamos
 
         # DONE: ambos en tolerancia por N ticks estables
-        if cx_in_tol and cy_in_tol:
+        if cx_in_tol and fwd_in_tol:
             self._dock_stable_count += 1
             if self._dock_stable_count >= self._dock_stable_n:
                 self._set_state(
@@ -541,9 +598,12 @@ class QRQuadAlignmentNode(Node):
         # ---- Comando combinado v + w ----
         self._dock_stable_count = 0
 
-        # v: solo si cy fuera de tolerancia (todavia tiene que avanzar)
-        if not cy_in_tol:
-            v_raw = self._kp_v_dock_px * abs(err_cy)
+        # v: solo si el eje de avance esta fuera de tolerancia
+        if not fwd_in_tol:
+            if self._dock_target_dist > 0.0:
+                v_raw = self._kp_v_dock_dist * dist_err      # proporcional a la distancia restante
+            else:
+                v_raw = self._kp_v_dock_px * abs(err_cy)
             v = _with_floor(v_raw, self._V_DEADBAND + 0.005, self._v_dock_max)
         else:
             v = 0.0
@@ -598,6 +658,8 @@ class QRQuadAlignmentNode(Node):
     def _set_state(self, new: State, reason: str = '') -> None:
         if new == self._state:
             return
+        if new == State.DOCK:
+            self._centered_count = 0   # fresh dock — don't carry over centering
         x_r, y_r, th_r = self._odom.pose()
         gs = (f' [odom=({x_r*1000:.0f},{y_r*1000:.0f},{math.degrees(th_r):+.0f})')
         if self._geom_latest is not None:
@@ -612,7 +674,11 @@ class QRQuadAlignmentNode(Node):
 
     # ------------------------------------------------------------------
     def _render_ui(self) -> None:
-        if not self._show_window or self._latest_frame is None:
+        if self._latest_frame is None:
+            return
+        # Build the annotated frame when EITHER a local window or the dashboard
+        # debug-image stream is wanted (headless robot → publish only).
+        if not (self._show_window or self._publish_debug_image):
             return
         out = self._detector.draw_detections(self._latest_frame, self._latest_dets)
 
@@ -651,6 +717,16 @@ class QRQuadAlignmentNode(Node):
             cv2.putText(out, t, (6, 40 + i * 16),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 0), 1, cv2.LINE_AA)
 
+        # Publish the annotated frame so the dashboard camera shows the live QR
+        # detection + pose (works headless, no cv2 window needed).
+        if self._publish_debug_image:
+            try:
+                self._pub_debug_img.publish(self._bridge.cv2_to_imgmsg(out, encoding='bgr8'))
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not self._show_window:
+            return
         cv2.imshow('qr_quad_alignment', out)
         key = cv2.waitKey(1) & 0xFF
         if key in (ord('q'), 27):
