@@ -2,8 +2,56 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <fstream>
+#include <sstream>
+#include <cctype>
+#include <cstdlib>
 
 namespace slam {
+
+namespace {
+// Trim ASCII whitespace from both ends.
+std::string trim(const std::string& s) {
+  size_t a = s.find_first_not_of(" \t\r\n");
+  if (a == std::string::npos) return "";
+  size_t b = s.find_last_not_of(" \t\r\n");
+  return s.substr(a, b - a + 1);
+}
+// Directory part of a path (for resolving a relative PGM image path).
+std::string dirOf(const std::string& p) {
+  size_t s = p.find_last_of('/');
+  return (s == std::string::npos) ? std::string() : p.substr(0, s);
+}
+// Read a binary P5 PGM (the format map_saver writes).  Skips '#' comment
+// lines in the header.  pixels come back row 0 = TOP of image.
+bool readPgmP5(const std::string& path, int& w, int& h,
+               std::vector<unsigned char>& px, std::string& err) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) { err = "cannot open PGM " + path; return false; }
+  std::string magic; f >> magic;
+  if (magic != "P5") { err = "not a P5 PGM: " + path; return false; }
+  auto nextInt = [&](long& out) -> bool {
+    while (true) {
+      int c = f.peek();
+      if (c == EOF) return false;
+      if (std::isspace(c)) { f.get(); continue; }
+      if (c == '#') { std::string line; std::getline(f, line); continue; }
+      break;
+    }
+    f >> out;
+    return static_cast<bool>(f);
+  };
+  long ww, hh, maxv;
+  if (!nextInt(ww) || !nextInt(hh) || !nextInt(maxv)) { err = "bad PGM header"; return false; }
+  if (maxv > 255) { err = "16-bit PGM unsupported"; return false; }
+  f.get();   // consume the single whitespace byte separating header from data
+  w = static_cast<int>(ww); h = static_cast<int>(hh);
+  px.resize(static_cast<size_t>(w) * h);
+  f.read(reinterpret_cast<char*>(px.data()), static_cast<std::streamsize>(px.size()));
+  if (static_cast<size_t>(f.gcount()) != px.size()) { err = "PGM data truncated"; return false; }
+  return true;
+}
+}  // namespace
 
 OccupancyGrid::OccupancyGrid(int width, int height, double resolution,
                              double l_occ, double l_free, double l_min, double l_max,
@@ -22,6 +70,94 @@ OccupancyGrid::OccupancyGrid(int width, int height, double resolution,
 void OccupancyGrid::reset() {
   std::fill(log_.begin(), log_.end(), 0.0f);
   lf_dirty_ = true;
+}
+
+bool OccupancyGrid::loadFromYaml(const std::string& yaml_path, std::string& err) {
+  std::ifstream yf(yaml_path);
+  if (!yf) { err = "cannot open yaml " + yaml_path; return false; }
+
+  // ── Minimal nav2 map-yaml parser (flat keys; origin as block or inline
+  //    list).  Robust enough for the files our map_saver writes. ──
+  std::string image;
+  double resolution = 0.0, ox = 0.0, oy = 0.0;
+  int negate = 0;
+  double occ_th = 0.65, free_th = 0.196;
+  bool have_res = false, have_origin = false;
+  std::vector<double> origin_vals;
+  bool in_origin_block = false;
+  std::string line;
+  while (std::getline(yf, line)) {
+    size_t hash = line.find('#');
+    if (hash != std::string::npos) line = line.substr(0, hash);
+    std::string t = trim(line);
+    if (t.empty()) continue;
+    if (in_origin_block) {
+      if (t[0] == '-') { origin_vals.push_back(std::atof(trim(t.substr(1)).c_str())); continue; }
+      in_origin_block = false;   // fall through and parse this line as a key
+    }
+    size_t colon = t.find(':');
+    if (colon == std::string::npos) continue;
+    std::string key = trim(t.substr(0, colon));
+    std::string val = trim(t.substr(colon + 1));
+    if (key == "image")                 image = val;
+    else if (key == "resolution")     { resolution = std::atof(val.c_str()); have_res = true; }
+    else if (key == "negate")           negate = std::atoi(val.c_str());
+    else if (key == "occupied_thresh")  occ_th = std::atof(val.c_str());
+    else if (key == "free_thresh")      free_th = std::atof(val.c_str());
+    else if (key == "origin") {
+      if (val.empty()) { in_origin_block = true; }     // block list on next lines
+      else {                                            // inline [x, y, yaw]
+        for (char& ch : val) if (ch == '[' || ch == ']' || ch == ',') ch = ' ';
+        std::istringstream iss(val); double v;
+        while (iss >> v) origin_vals.push_back(v);
+      }
+    }
+  }
+  if (origin_vals.size() >= 2) { ox = origin_vals[0]; oy = origin_vals[1]; have_origin = true; }
+  if (image.empty())  { err = "yaml missing 'image'";       return false; }
+  if (!have_res)      { err = "yaml missing 'resolution'";  return false; }
+  if (!have_origin)   { err = "yaml missing 'origin'";      return false; }
+
+  std::string img_path = image;
+  if (img_path.empty() || img_path[0] != '/') img_path = dirOf(yaml_path) + "/" + img_path;
+
+  int pw, ph;
+  std::vector<unsigned char> px;
+  if (!readPgmP5(img_path, pw, ph, px, err)) return false;
+
+  // Geometry must match this grid: origin is derived from (w, h, res) at
+  // construction, so a saved map built from a different grid config would
+  // localise against a shifted world.  Refuse rather than silently offset.
+  if (pw != w_ || ph != h_) {
+    err = "size " + std::to_string(pw) + "x" + std::to_string(ph) +
+          " != grid " + std::to_string(w_) + "x" + std::to_string(h_);
+    return false;
+  }
+  if (std::abs(resolution - res_) > 1e-6) {
+    err = "resolution " + std::to_string(resolution) + " != grid " + std::to_string(res_);
+    return false;
+  }
+  if (std::abs(ox - origin_x_) > res_ || std::abs(oy - origin_y_) > res_) {
+    err = "origin [" + std::to_string(ox) + "," + std::to_string(oy) +
+          "] != grid [" + std::to_string(origin_x_) + "," + std::to_string(origin_y_) + "]";
+    return false;
+  }
+
+  // Seed the log grid.  PGM row 0 = top of image; grid row 0 = bottom (ROS
+  // convention) → flip vertically, exactly inverting the map_saver writer.
+  for (int r = 0; r < ph; ++r) {
+    const int gy = ph - 1 - r;
+    for (int c = 0; c < pw; ++c) {
+      const unsigned char p = px[static_cast<size_t>(r) * pw + c];
+      const double prob = negate ? (p / 255.0) : (1.0 - p / 255.0);
+      const size_t idx = static_cast<size_t>(gy) * w_ + c;
+      if (prob >= occ_th)       log_[idx] = static_cast<float>(l_max_);   // wall
+      else if (prob < free_th)  log_[idx] = static_cast<float>(l_min_);   // free
+      else                      log_[idx] = 0.0f;                          // unknown
+    }
+  }
+  lf_dirty_ = true;
+  return true;
 }
 
 std::unique_ptr<OccupancyGrid> OccupancyGrid::cloneEmpty() const {

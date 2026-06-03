@@ -209,25 +209,51 @@ async function loadMapInfo() {
 // Lifter
 // ---------------------------------------------------------------------------
 
+// SPI HAL (Tang Nano) only reaches levels 0-3 on the real robot.
+const LIFTER_MAX = 3;
+
 function initLifter() {
-  const col = document.getElementById('lifterColumn');
-  if (!col) return;
-  col.innerHTML = '';
-  for (let i = 7; i >= 0; i--) {
-    const seg = document.createElement('div');
-    seg.className = 'lifter-segment';
-    seg.id = `seg${i}`;
-    col.appendChild(seg);
+  const row = document.getElementById('lifterButtons');
+  if (!row) return;
+  row.innerHTML = '';
+  for (let i = 0; i <= LIFTER_MAX; i++) {
+    const btn = document.createElement('button');
+    btn.className   = 'lifter-btn';
+    btn.id          = `lift${i}`;
+    btn.type        = 'button';
+    btn.textContent = String(i);
+    btn.addEventListener('click', () => setLifter(i));
+    row.appendChild(btn);
   }
+  updateLifter(0);
 }
 
+// Highlight the current (reported) level. Driven by /lifter_status telemetry.
 function updateLifter(level) {
-  for (let i = 0; i <= 7; i++) {
-    const seg = document.getElementById(`seg${i}`);
-    if (!seg) continue;
-    seg.classList.toggle('active', i <= level);
+  for (let i = 0; i <= LIFTER_MAX; i++) {
+    const btn = document.getElementById(`lift${i}`);
+    if (btn) btn.classList.toggle('active', i === level);
   }
   setText('lifterText', String(level));
+}
+
+// Command a target level → /lifter_level (via POST /api/lifter).
+async function setLifter(level) {
+  try {
+    const res = await fetch('/api/lifter', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({level}),
+    });
+    const json = await res.json();
+    if (json.ok) {
+      showToast(`Lifter → ${level}`, 'success');
+    } else {
+      showToast(`Error: ${json.error || 'unknown'}`, 'error');
+    }
+  } catch (err) {
+    showToast(`Network error: ${err.message}`, 'error');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +349,40 @@ function initNavControls() {
   });
 
   btnCancel?.addEventListener('click', () => sendGoalWaypoint(''));
+}
+
+// ---------------------------------------------------------------------------
+// Quick mission control — one-click missions + abort
+// ---------------------------------------------------------------------------
+
+async function _sendQuickMission(type) {
+  try {
+    const res  = await fetch('/api/mission', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({type}),
+    });
+    const json = await res.json();
+    if (!res.ok || json.error) {
+      showToast(`Error: ${json.error || res.status}`, 'error');
+    } else {
+      showToast(`Misión enviada: ${type}`, 'success');
+    }
+  } catch (err) {
+    showToast(`Network error: ${err.message}`, 'error');
+  }
+}
+
+function initQuickControl() {
+  document.getElementById('btnMissionRollers')
+    ?.addEventListener('click', () => _sendQuickMission('ROLLER_TO_TRUCK'));
+  document.getElementById('btnMissionRacks')
+    ?.addEventListener('click', () => _sendQuickMission('RACK_TO_TRUCK'));
+  document.getElementById('btnMissionAbort')?.addEventListener('click', () => {
+    if (!confirm('¿Abortar la misión actual?')) return;
+    _smControl({action: 'abort'});
+    showToast('Abort enviado', 'success');
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -717,16 +777,42 @@ function initEditMode() {
 // Waypoint popup
 // ---------------------------------------------------------------------------
 
+// Next free name for a type, mirroring the server's authoritative scheme
+// (<type>_<n>).  Shown only as a preview — the server assigns the final name
+// under a lock so two quick saves can't collide.
+function _nextWaypointName(type) {
+  const re = new RegExp(`^${type}_(\\d+)$`);
+  let maxN = 0;
+  Object.keys(_waypoints).forEach((name) => {
+    const m = name.match(re);
+    if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+  });
+  return `${type}_${maxN + 1}`;
+}
+
+function _selectedWpType() {
+  return document.querySelector('#wpTypeGroup .wp-type-btn.active')?.dataset.type || 'roller';
+}
+
+function _setWpType(type) {
+  document.querySelectorAll('#wpTypeGroup .wp-type-btn').forEach((b) => {
+    b.classList.toggle('active', b.dataset.type === type);
+  });
+  _updateWpNamePreview();
+}
+
+function _updateWpNamePreview() {
+  setText('wpNamePreview', `Name: ${_nextWaypointName(_selectedWpType())}`);
+}
+
 function showWaypointPopup(wx, wy, theta) {
   setText('wpCoords', `x: ${wx.toFixed(3)} m,  y: ${wy.toFixed(3)} m`);
   setText('wpHeading',
     `θ: ${theta.toFixed(3)} rad (${(theta * 180 / Math.PI).toFixed(1)}°)`);
 
-  const nameIn = document.getElementById('wpName');
-  if (nameIn) nameIn.value = '';
+  _setWpType('roller');   // reset to default selection each time the popup opens
 
   document.getElementById('waypointPopup').classList.remove('hidden');
-  setTimeout(() => nameIn && nameIn.focus(), 50);
 }
 
 function hideWaypointPopup() {
@@ -737,37 +823,33 @@ function hideWaypointPopup() {
 function initWaypointPopup() {
   document.getElementById('btnCancelWaypoint')?.addEventListener('click', hideWaypointPopup);
 
+  // Type toggle buttons: highlight the picked one and refresh the name preview.
+  document.querySelectorAll('#wpTypeGroup .wp-type-btn').forEach((btn) => {
+    btn.addEventListener('click', () => _setWpType(btn.dataset.type));
+  });
+
   document.getElementById('btnSaveWaypoint')?.addEventListener('click', async () => {
-    const name = (document.getElementById('wpName')?.value || '').trim();
-    if (!name) {
-      document.getElementById('wpName')?.focus();
-      return;
-    }
     if (!_pendingWp) return;
+    const type  = _selectedWpType();
     const theta = _pendingWp.theta || 0;
 
     try {
       const res = await fetch('/api/waypoints', {
         method:  'POST',
         headers: {'Content-Type': 'application/json'},
-        body:    JSON.stringify({name, x: _pendingWp.x, y: _pendingWp.y, theta}),
+        body:    JSON.stringify({type, x: _pendingWp.x, y: _pendingWp.y, theta}),
       });
       const json = await res.json();
       if (json.ok) {
         hideWaypointPopup();
         await loadWaypoints();
-        showToast(`Waypoint "${name}" saved`, 'success');
+        showToast(`Waypoint "${json.name || type}" saved`, 'success');
       } else {
         showToast(`Error: ${json.error || 'unknown'}`, 'error');
       }
     } catch (err) {
       showToast(`Network error: ${err.message}`, 'error');
     }
-  });
-
-  // Allow Enter to save in the name field
-  document.getElementById('wpName')?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') document.getElementById('btnSaveWaypoint')?.click();
   });
 }
 
@@ -945,23 +1027,19 @@ function initSystemMode() {
 
 document.addEventListener('DOMContentLoaded', () => {
   initLifter();
-  startUptimeClock();
-  initTabs();
   loadWaypoints();
   initNavControls();
+  initQuickControl();
   initTeleop();
   initEditMode();
   initMapInteraction();
   initWaypointPopup();
-  initVoice();
   initSystemMode();
-  initSmDebugPanel();
+  initVoice();
 
   // Preload map and fetch metadata immediately
   _mapImg.src = '/api/map';
   loadMapInfo();
-
-  initMissionBuilder();
 });
 
 // ---------------------------------------------------------------------------

@@ -91,6 +91,18 @@ class NavNode(Node):
         self.declare_parameter('inflation_radius_min', 0.10)
         self.declare_parameter('linear_speed',        0.15)
         self.declare_parameter('angular_kp',          2.0)
+        # Derivative (damping) gain for the pure-pursuit heading loop.
+        # The controller used to be pure-P, which — with omega clamped to
+        # angular_max — saturated at ~6° of heading error and behaved like
+        # bang-bang, exciting a limit cycle against the twist_relay accel
+        # ramp (≈0.84 s to reverse omega).  angular_kd adds active damping
+        # on the (filtered) heading-error rate so the loop has non-zero ζ.
+        # angular_kd_tau is the low-pass time constant applied to that
+        # derivative (blocks EKF pose jitter / lookahead segment-snap from
+        # becoming omega chatter).  Both are ROS params so they can be
+        # live-tuned with `ros2 param set` during a tuning run.
+        self.declare_parameter('angular_kd',          0.5)
+        self.declare_parameter('angular_kd_tau',      0.20)
         self.declare_parameter('angular_max',         1.2)
         self.declare_parameter('goal_tolerance',      0.20)
         self.declare_parameter('lookahead_distance',  0.40)
@@ -113,6 +125,23 @@ class NavNode(Node):
         # exactly like slam_node does.  Without it the front-arc, wall-follow
         # and local costmap point 180° the wrong way on the real robot.
         self.declare_parameter('base_frame',          'base_link')
+
+        # Pose source for the steering loop.  'slam_pose' (default) steers on
+        # the RAW /slam_pose heading — the unfiltered AMCL estimate, which
+        # steps every scan on particle resampling, scan-to-map refine (±8°)
+        # and loop closure.  Those steps feed the pure-pursuit P term and the
+        # PD derivative directly, so the robot weaves chasing pose jitter.
+        # Set 'tf' to instead read map→base_frame from the TF tree each tick:
+        # the smooth (slam tf_alpha / relay-EMA) map→odom composed with the
+        # 50 Hz wheel odom→base — a complementary filter that rejects the
+        # per-scan jitter while still tracking real rotation between scans.
+        # /slam_pose stays subscribed as the fallback (see _maybe_update_pose_
+        # from_tf), so a TF lookup failure never stalls control.  OPT-IN:
+        # confirm with the pose-jitter probe (and rule out scan latency)
+        # before flipping it, and on the laptop also set the relay's
+        # tf_smoothing_alpha < 1.0 (the relay rebuilds map→odom from raw
+        # /slam_pose and otherwise passes the jitter straight through).
+        self.declare_parameter('pose_source',         'slam_pose')
 
         # ── Local costmap (rolling LiDAR memory) ──────────────────────
         self.declare_parameter('local_costmap_radius',        2.0)
@@ -239,6 +268,18 @@ class NavNode(Node):
         self._state: str = _State.IDLE
         self._current_goal_name: str = ''
         self._arrived_timer: Optional[object] = None
+
+        # ── Pure-pursuit PD steering state ─────────────────────────────
+        # The derivative term operates on the CONTINUOUS heading error and
+        # is low-pass filtered.  It must be reset (via _reset_pd) whenever a
+        # fresh path/segment context begins — a wholesale self._path swap
+        # makes the lookahead point, and thus heading_error, step
+        # discontinuously, and differentiating across that step would spike
+        # omega.  _pd_valid stays False until we hold a trustworthy previous
+        # sample so the first tick after a reset contributes no derivative.
+        self._prev_heading_error: float = 0.0
+        self._d_filt: float = 0.0
+        self._pd_valid: bool = False
 
         # Bug1 state
         self._q_hit: Optional[WorldPt] = None    # where we first hit the obstacle
@@ -443,6 +484,37 @@ class NavNode(Node):
         cosy_cosp = 1.0 - 2.0 * (ori.y * ori.y + ori.z * ori.z)
         self._pose_theta = math.atan2(siny_cosp, cosy_cosp)
 
+    def _maybe_update_pose_from_tf(self) -> None:
+        """When pose_source == 'tf', override the pose with a smooth TF read.
+
+        Steers on map→base_frame from the TF tree instead of the raw
+        /slam_pose heading.  That transform is the low-pass-smoothed map→odom
+        (slam_node's tf_alpha on-board, or the map_odom_relay EMA on the
+        laptop) composed with the 50 Hz wheel odom→base — i.e. a complementary
+        filter: it rejects the per-scan AMCL / refine / loop-closure heading
+        steps yet still tracks real rotation between scans, so it adds almost
+        no lag to the loop (unlike low-passing /slam_pose wholesale).
+
+        /slam_pose remains the fallback: any lookup failure (TF not yet
+        published, time extrapolation, clock skew) returns early and leaves
+        the last /slam_pose-derived pose in place, so the control loop never
+        stalls or coasts on a stale exception path.
+        """
+        if str(self.get_parameter('pose_source').value).lower() != 'tf':
+            return
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                'map', self._base_frame, RclpyTime())
+        except Exception:
+            return  # keep last /slam_pose pose — never stall the control loop
+        t = tf.transform.translation
+        q = tf.transform.rotation
+        self._pose_x = t.x
+        self._pose_y = t.y
+        siny = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        self._pose_theta = math.atan2(siny, cosy)
+
     def _goal_cb(self, msg: String) -> None:
         name = msg.data.strip()
 
@@ -507,6 +579,7 @@ class NavNode(Node):
         self._current_goal_name = name
         self._path_blocked_ticks = 0
         self._last_replan_time = self.get_clock().now().nanoseconds * 1e-9
+        self._reset_pd()
         self._state = _State.FOLLOWING
         self._publish_status(f'FOLLOWING: {name}')
 
@@ -520,6 +593,13 @@ class NavNode(Node):
 
         if self._pose_x is None:
             return
+
+        # Optionally replace the raw /slam_pose pose with the smooth,
+        # odom-propagated TF reading (pose_source == 'tf').  Done here so the
+        # costmap and every per-state controller below steer on the same
+        # de-jittered pose.  No-op (and zero cost) when pose_source is the
+        # default 'slam_pose'.
+        self._maybe_update_pose_from_tf()
 
         # Tick the local costmap (decay + recenter).  This runs in every
         # state so the costmap stays fresh even while waiting or wall-following.
@@ -639,9 +719,11 @@ class NavNode(Node):
 
         heading_error = self._wrap_angle(math.atan2(ly - py, lx - px) - theta)
 
-        kp   = self.get_parameter('angular_kp').value
-        wmax = self.get_parameter('angular_max').value
-        vmax = self.get_parameter('linear_speed').value
+        kp     = self.get_parameter('angular_kp').value
+        kd     = self.get_parameter('angular_kd').value
+        kd_tau = self.get_parameter('angular_kd_tau').value
+        wmax   = self.get_parameter('angular_max').value
+        vmax   = self.get_parameter('linear_speed').value
 
         # ── Reverse maneuver decision ──────────────────────────────
         # When the lookahead point is in the rear hemisphere AND close
@@ -667,7 +749,35 @@ class NavNode(Node):
             ctrl_error = heading_error
             sign = +1.0
 
-        omega = self._clamp(kp * ctrl_error, -wmax, wmax)
+        # ── Filtered derivative (damping) term ─────────────────────
+        # Computed on the CONTINUOUS heading_error, NOT on ctrl_error.
+        # A reverse maneuver only flips ctrl_error (by π) and the linear-
+        # speed sign — heading_error itself does not jump — so its
+        # derivative is spike-free across a reverse toggle and equals
+        # d(ctrl_error)/dt in both regimes.  That means the damping term
+        # is applied with the SAME sign whether driving forward or in
+        # reverse (no `sign` multiplier — that would be anti-damping in
+        # reverse).  The wrap on the difference handles the heading
+        # crossing ±π between ticks; the low-pass (tau = angular_kd_tau)
+        # stops EKF pose jitter and lookahead segment-snap from turning
+        # into omega chatter.
+        dt = 1.0 / self.get_parameter('control_rate').value
+        if self._pd_valid and dt > 1e-6:
+            raw_de = self._wrap_angle(heading_error - self._prev_heading_error) / dt
+            # Belt-and-suspenders clamp against any residual step the
+            # path-reset gates miss (segment snap, single pose glitch):
+            # cap the raw rate at what the actuator could use anyway.
+            raw_de = self._clamp(raw_de, -2.0, 2.0)
+            alpha = dt / (kd_tau + dt)
+            self._d_filt += alpha * (raw_de - self._d_filt)
+        else:
+            # First tick after a (re)plan / FOLLOWING re-entry: no
+            # trustworthy previous sample yet, so contribute no derivative.
+            self._d_filt = 0.0
+        self._prev_heading_error = heading_error
+        self._pd_valid = True
+
+        omega = self._clamp(kp * ctrl_error + kd * self._d_filt, -wmax, wmax)
         speed_mag = vmax * max(0.0, math.cos(ctrl_error)) * min(1.0, dist_to_goal / 0.5)
         speed = sign * speed_mag
 
@@ -714,6 +824,7 @@ class NavNode(Node):
                 'Bubble cleared — resuming original path.'
             )
             self._bubble_breach_ticks = 0
+            self._reset_pd()
             self._state = _State.FOLLOWING
             self._publish_status(f'FOLLOWING: {self._current_goal_name}')
             return
@@ -737,6 +848,7 @@ class NavNode(Node):
                     'resuming original path.'
                 )
                 self._bubble_breach_ticks = 0
+                self._reset_pd()
                 self._state = _State.FOLLOWING
                 self._publish_status(f'FOLLOWING: {self._current_goal_name}')
                 return
@@ -997,6 +1109,7 @@ class NavNode(Node):
         self.get_logger().info(f'Replanned path ({len(path)} pts), resuming FOLLOWING')
         self._path = path
         self._last_replan_time = self.get_clock().now().nanoseconds * 1e-9
+        self._reset_pd()
         self._state = _State.FOLLOWING
         self._publish_status(f'FOLLOWING: {self._current_goal_name}')
         return True
@@ -1341,8 +1454,23 @@ class NavNode(Node):
         self._state = _State.IDLE
         self._current_goal_name = ''
         self._path_blocked_ticks = 0
+        self._reset_pd()
         self._publish_status('IDLE')
         self.get_logger().info('Navigation cancelled.')
+
+    def _reset_pd(self) -> None:
+        """Clear the pure-pursuit derivative state.
+
+        Called wherever a fresh path/segment context begins — a new goal,
+        a replan, or any re-entry into FOLLOWING.  The lookahead point (and
+        therefore heading_error) can step discontinuously when self._path is
+        replaced wholesale; differentiating across that step would spike
+        omega.  Setting _pd_valid=False makes the next control tick rebuild
+        the previous sample before contributing any derivative.
+        """
+        self._prev_heading_error = 0.0
+        self._d_filt = 0.0
+        self._pd_valid = False
 
     # ------------------------------------------------------------------
     # Publishing helpers

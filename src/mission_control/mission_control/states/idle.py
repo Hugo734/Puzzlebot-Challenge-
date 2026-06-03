@@ -18,12 +18,12 @@ _POLL_INTERVAL = 0.1
 
 
 class Idle(DebuggableState):
-    """Wait for an incoming mission and hand it to PLAN_MISSION.
+    """Wait for an incoming mission and hand it to SEARCH.
 
     Outcomes:
         mission_received — a valid JSON arrived; pre-parsed dict is on the
                            blackboard under ``current_mission`` (None on parse
-                           error → still transitions, and PLAN_MISSION decides).
+                           error → still transitions, and SEARCH decides).
     """
 
     def __init__(self, debug_ctx: DebugContext, zones_data: dict, **kwargs) -> None:
@@ -55,7 +55,7 @@ class Idle(DebuggableState):
             if raw:
                 parsed = parse_mission(raw, self._zones)
                 # Always consume the raw payload so the same string isn't
-                # re-parsed forever; PLAN_MISSION sees parse_failure via None.
+                # re-parsed forever; SEARCH sees parse_failure via None.
                 blackboard["mission_raw"] = None
                 blackboard["current_mission"] = parsed
                 if parsed is None:

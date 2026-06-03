@@ -29,6 +29,14 @@ def _yaw(z, w):
     return 2.0 * math.atan2(z, w)
 
 
+def _wrap(a):
+    while a > math.pi:
+        a -= 2.0 * math.pi
+    while a < -math.pi:
+        a += 2.0 * math.pi
+    return a
+
+
 class MapOdomRelay(Node):
     def __init__(self):
         super().__init__('map_odom_relay')
@@ -38,6 +46,19 @@ class MapOdomRelay(Node):
         self._odom_frame = self.declare_parameter('odom_frame', 'odom').value
         self._base_frame = self.declare_parameter('base_frame', 'base_footprint').value
         self._pose_topic = self.declare_parameter('pose_topic', '/slam_pose').value
+        # Exponential-moving-average smoothing on the reconstructed map→odom.
+        # /slam_pose carries the RAW AMCL estimate, which steps every scan on
+        # particle resampling, scan-to-map refine (±8°) and loop closure.
+        # Those steps reach any consumer that reads map→base from TF — e.g.
+        # nav_node steering on a smooth heading (pose_source:=tf).  alpha=1.0
+        # (default) is pass-through (no behaviour change); set 0.4–0.6 to
+        # reject the jitter the same way slam_node's own tf_alpha does for its
+        # on-board map→odom.  The 50 Hz odom→base still fills motion between
+        # updates, so the lag lands only on the slow correction term.
+        self._alpha = float(self.declare_parameter('tf_smoothing_alpha', 1.0).value)
+        self._rx = None
+        self._ry = None
+        self._rth = None
         self.create_subscription(PoseStamped, self._pose_topic, self._on_pose, 10)
         self._warned = False
         self.get_logger().info(
@@ -66,6 +87,17 @@ class MapOdomRelay(Node):
         rx = mx + bx * cm - by * sm
         ry = my + bx * sm + by * cm
         rth = mth + bth
+
+        # EMA-smooth the reconstructed map→odom (alpha < 1.0 enables it).
+        # Wrap the heading delta so smoothing stays correct across ±π.
+        a = self._alpha
+        if a < 1.0 and self._rth is not None:
+            self._rx = self._rx + a * (rx - self._rx)
+            self._ry = self._ry + a * (ry - self._ry)
+            self._rth = _wrap(self._rth + a * _wrap(rth - self._rth))
+        else:
+            self._rx, self._ry, self._rth = rx, ry, rth
+        rx, ry, rth = self._rx, self._ry, self._rth
 
         tf = TransformStamped()
         tf.header.stamp = msg.header.stamp

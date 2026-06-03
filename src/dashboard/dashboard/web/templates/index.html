@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -74,335 +74,149 @@
     </section>
 
     <!-- ================================================================
-         RIGHT PANEL — controls
+         RIGHT PANEL — everything always visible, no tabs
          ================================================================ -->
     <aside class="panel-right">
 
-      <!-- State + Mission (always visible) -->
+      <!-- ---- ROBOT STATE + telemetry ---- -->
       <section class="card">
         <h2 class="card-title">Robot State</h2>
         <div class="state-badge" id="stateBadge">UNKNOWN</div>
         <div id="missionBox" class="mission-box" style="margin-top:10px">
           <p class="dim">No active mission</p>
         </div>
+        <div class="tele-grid" style="margin-top:10px">
+          <span class="tele-label">Candidate</span>
+          <span class="tele-val mono" id="smCurrentCandidate">—</span>
+          <span class="tele-label">QR</span>
+          <span class="tele-val mono accent" id="smQrValue">—</span>
+          <span class="tele-label">Dest</span>
+          <span class="tele-val mono" id="smResolvedDest">—</span>
+          <span class="tele-label">X</span>
+          <span class="tele-val mono" id="poseX">0.000 m</span>
+          <span class="tele-label">Y</span>
+          <span class="tele-val mono" id="poseY">0.000 m</span>
+          <span class="tele-label">&theta;</span>
+          <span class="tele-val mono" id="poseTheta">0.0000 rad</span>
+          <span class="tele-label">Lin</span>
+          <span class="tele-val mono" id="velLinear">0.000 m/s</span>
+          <span class="tele-label">Ang</span>
+          <span class="tele-val mono" id="velAngular">0.000 rad/s</span>
+        </div>
       </section>
 
-      <!-- Tab bar -->
-      <div class="tab-bar">
-        <button class="tab-btn active" data-tab="navigate">NAV</button>
-        <button class="tab-btn" data-tab="mission">MISSION</button>
-        <button class="tab-btn" data-tab="sm">SM</button>
-        <button class="tab-btn" data-tab="teleop">TELEOP</button>
-        <button class="tab-btn" data-tab="camera">CAM</button>
-        <button class="tab-btn" data-tab="voice">VOICE</button>
-      </div>
+      <!-- ---- CAMERA (always visible) ---- -->
+      <section class="card">
+        <h2 class="card-title">Cámara</h2>
+        <div class="feed-wrap">
+          <img
+            id="cameraFeed"
+            class="feed-img"
+            src="/video_feed"
+            alt="Live camera feed"
+            onerror="this.src='/video_feed'"
+          />
+        </div>
+      </section>
 
-      <!-- ---- TAB: NAVIGATE ---- -->
-      <div class="tab-pane" id="tab-navigate">
+      <!-- ---- LIFTER (4 levels, click to set) ---- -->
+      <section class="card">
+        <h2 class="card-title">Lifter</h2>
+        <div class="lifter-btn-row" id="lifterButtons"></div>
+        <p class="lifter-text">Nivel actual: <span class="mono accent" id="lifterText">0</span></p>
+      </section>
 
-        <section class="card">
-          <h2 class="card-title">Navigation Control</h2>
-          <div class="nav-form">
-            <label class="form-label" for="waypointSelect">Waypoint</label>
-            <select id="waypointSelect" class="form-select">
-              <option value="">— loading… —</option>
-            </select>
-            <div style="display:flex;gap:6px">
-              <button class="btn-submit" id="btnGoWaypoint" type="button" style="flex:1">&#9654; Go</button>
-              <button class="btn-cancel" id="btnCancelNav" type="button" style="flex:1">&#9632; Cancel</button>
-            </div>
+      <!-- ---- CONTROL (quick missions) ---- -->
+      <section class="card">
+        <h2 class="card-title">Control</h2>
+        <div class="quick-control">
+          <button class="quick-btn" id="btnMissionRollers" type="button">&#128269; Buscar en rollers</button>
+          <button class="quick-btn" id="btnMissionRacks" type="button">&#128269; Buscar en racks</button>
+          <button class="quick-btn quick-btn-stop" id="btnMissionAbort" type="button">&#9632; Abort</button>
+        </div>
+      </section>
+
+      <!-- ---- VOICE ---- -->
+      <section class="card">
+        <h2 class="card-title">Voz</h2>
+        <div class="voice-btn-row">
+          <button class="btn-voice-record" id="btnVoiceRecord" type="button">
+            &#9679; Hold to Record
+          </button>
+        </div>
+        <div class="voice-status-row">
+          <span class="tele-label">Status</span>
+          <span class="voice-status" id="voiceStatus">Ready</span>
+        </div>
+        <div class="voice-result-box" id="voiceResultBox">
+          <span class="voice-result-label">Last word:</span>
+          <span class="voice-result-word mono accent" id="voiceResultWord">—</span>
+        </div>
+        <p class="teleop-hint" id="voiceModelStatus">Checking models…</p>
+        <div class="voice-vocab" id="voiceVocab">
+          <span class="dim">Loading…</span>
+        </div>
+      </section>
+
+      <!-- ---- NAVIGATE TO WAYPOINT ---- -->
+      <section class="card">
+        <h2 class="card-title">Ir a Waypoint</h2>
+        <div class="nav-form">
+          <select id="waypointSelect" class="form-select">
+            <option value="">— cargando… —</option>
+          </select>
+          <div style="display:flex;gap:6px">
+            <button class="btn-submit" id="btnGoWaypoint" type="button" style="flex:1">&#9654; Go</button>
+            <button class="btn-cancel" id="btnCancelNav" type="button" style="flex:1">&#9632; Cancel</button>
           </div>
-          <div class="nav-status-box">
-            <span class="tele-label">Status:</span>
-            <span class="nav-status-badge" id="navStatusBadge">UNKNOWN</span>
-          </div>
-        </section>
+        </div>
+        <div class="nav-status-box">
+          <span class="tele-label">Status:</span>
+          <span class="nav-status-badge" id="navStatusBadge">UNKNOWN</span>
+        </div>
+      </section>
 
-        <section class="card">
-          <h2 class="card-title">Pose</h2>
-          <div class="tele-grid">
-            <span class="tele-label">X</span>
-            <span class="tele-val mono" id="poseX">0.000 m</span>
-            <span class="tele-label">Y</span>
-            <span class="tele-val mono" id="poseY">0.000 m</span>
-            <span class="tele-label">&theta;</span>
-            <span class="tele-val mono" id="poseTheta">0.0000 rad</span>
+      <!-- ---- TELEOP ---- -->
+      <section class="card">
+        <h2 class="card-title">Teleop Manual</h2>
+        <div class="teleop-keys">
+          <div class="key-row">
+            <div class="key-spacer"></div>
+            <div class="key" id="keyW">W</div>
+            <div class="key-spacer"></div>
           </div>
-        </section>
-
-        <section class="card">
-          <h2 class="card-title">Velocity</h2>
+          <div class="key-row">
+            <div class="key" id="keyA">A</div>
+            <div class="key" id="keyS">S</div>
+            <div class="key" id="keyD">D</div>
+          </div>
+        </div>
+        <div style="margin:10px 0">
           <div class="vel-row">
             <span class="tele-label">Linear</span>
-            <div class="vel-bar-wrap"><div class="vel-bar vel-bar-linear" id="barLinear"></div></div>
-            <span class="tele-val mono" id="velLinear">0.000 m/s</span>
+            <div class="vel-bar-wrap bipolar-wrap">
+              <div class="bipolar-center"></div>
+              <div class="vel-bar vel-bar-linear bipolar-wrap-bar" id="tBarLinear" style="width:0%;left:50%"></div>
+            </div>
+            <span class="tele-val mono" id="tVelLinear">0.00</span>
           </div>
           <div class="vel-row">
             <span class="tele-label">Angular</span>
-            <div class="vel-bar-wrap"><div class="vel-bar vel-bar-angular" id="barAngular"></div></div>
-            <span class="tele-val mono" id="velAngular">0.000 rad/s</span>
-          </div>
-        </section>
-
-        <section class="card">
-          <h2 class="card-title">Lifter Level</h2>
-          <div class="lifter-wrap">
-            <div class="lifter-column" id="lifterColumn"></div>
-            <div class="lifter-labels">
-              <span>7</span><span>6</span><span>5</span><span>4</span>
-              <span>3</span><span>2</span><span>1</span><span>0</span>
+            <div class="vel-bar-wrap bipolar-wrap">
+              <div class="bipolar-center"></div>
+              <div class="vel-bar vel-bar-angular bipolar-wrap-bar" id="tBarAngular" style="width:0%;left:50%"></div>
             </div>
+            <span class="tele-val mono" id="tVelAngular">0.00</span>
           </div>
-          <p class="lifter-text">Level: <span class="mono accent" id="lifterText">0</span></p>
-        </section>
-
-      </div><!-- /tab-navigate -->
-
-      <!-- ---- TAB: MISSION ---- -->
-      <div class="tab-pane hidden" id="tab-mission">
-
-        <section class="card">
-          <h2 class="card-title">Send Mission</h2>
-          <form id="missionForm" class="mission-form" autocomplete="off">
-
-            <label class="form-label" for="missionType">Mission type</label>
-            <select id="missionType" class="form-select" required>
-              <option value="ROLLER_TO_TRUCK">Roller &rarr; Truck (search QR)</option>
-              <option value="RACK_TO_TRUCK">Rack &rarr; Truck (search QR)</option>
-              <option value="CUSTOM">Custom</option>
-            </select>
-
-            <label class="form-label" for="missionIdInput">Mission ID <span class="dim">(optional)</span></label>
-            <input id="missionIdInput" class="form-input" type="text" placeholder="auto" />
-
-            <!-- =========== SEARCH MISSIONS (ROLLER / RACK) =========== -->
-            <div class="mission-section" id="missionSearchSection">
-              <label class="form-label">Candidates <span class="dim">(none → visit all)</span></label>
-              <div class="checkbox-grid" id="candidateList">
-                <span class="dim">Loading zones…</span>
-              </div>
-            </div>
-
-            <!-- =========== CUSTOM =========== -->
-            <div class="mission-section hidden" id="missionCustomSection">
-              <label class="form-label" for="customSource">Source waypoint</label>
-              <select id="customSource" class="form-select"></select>
-
-              <label class="sm-toggle-row">
-                <input type="checkbox" id="customScanQr" />
-                <span>Scan QR at source (use payload as destination)</span>
-              </label>
-
-              <label class="form-label" for="customDest">Destination</label>
-              <select id="customDest" class="form-select"></select>
-
-              <label class="sm-toggle-row">
-                <input type="checkbox" id="customSkipAlign" />
-                <span>Skip alignment (use waypoint pose only)</span>
-              </label>
-            </div>
-
-            <!-- =========== COMMON FIELDS =========== -->
-            <label class="form-label" for="pickupLevel">Pickup lifter level (0–7)</label>
-            <input id="pickupLevel" class="form-input" type="number" min="0" max="7" value="1" />
-
-            <label class="form-label" for="placeLevel">Place lifter level (0–7)</label>
-            <input id="placeLevel" class="form-input" type="number" min="0" max="7" value="2" />
-
-            <button class="btn-submit" type="submit">&#9654; Send Mission</button>
-          </form>
-          <pre class="sm-bb-json mono" id="missionPreview" style="margin-top:10px"></pre>
-          <div id="toast" class="toast hidden"></div>
-        </section>
-
-        <section class="card">
-          <h2 class="card-title">Mission History</h2>
-          <ul class="history-list" id="historyList">
-            <li class="dim">No missions sent yet</li>
-          </ul>
-        </section>
-
-        <section class="card">
-          <h2 class="card-title">Session Stats</h2>
-          <div class="tele-grid">
-            <span class="tele-label">Missions sent</span>
-            <span class="tele-val mono accent" id="statMissions">0</span>
-            <span class="tele-label">Uptime</span>
-            <span class="tele-val mono" id="statUptime">00:00:00</span>
-            <span class="tele-label">WS events</span>
-            <span class="tele-val mono" id="statEvents">0</span>
-          </div>
-        </section>
-
-      </div><!-- /tab-mission -->
-
-      <!-- ---- TAB: TELEOP ---- -->
-      <div class="tab-pane hidden" id="tab-teleop">
-
-        <section class="card">
-          <h2 class="card-title">Teleop Manual</h2>
-          <div class="teleop-keys">
-            <div class="key-row">
-              <div class="key-spacer"></div>
-              <div class="key" id="keyW">W</div>
-              <div class="key-spacer"></div>
-            </div>
-            <div class="key-row">
-              <div class="key" id="keyA">A</div>
-              <div class="key" id="keyS">S</div>
-              <div class="key" id="keyD">D</div>
-            </div>
-          </div>
-          <div style="margin:10px 0">
-            <div class="vel-row">
-              <span class="tele-label">Linear</span>
-              <div class="vel-bar-wrap bipolar-wrap">
-                <div class="bipolar-center"></div>
-                <div class="vel-bar vel-bar-linear bipolar-wrap-bar" id="tBarLinear" style="width:0%;left:50%"></div>
-              </div>
-              <span class="tele-val mono" id="tVelLinear">0.00</span>
-            </div>
-            <div class="vel-row">
-              <span class="tele-label">Angular</span>
-              <div class="vel-bar-wrap bipolar-wrap">
-                <div class="bipolar-center"></div>
-                <div class="vel-bar vel-bar-angular bipolar-wrap-bar" id="tBarAngular" style="width:0%;left:50%"></div>
-              </div>
-              <span class="tele-val mono" id="tVelAngular">0.00</span>
-            </div>
-          </div>
-          <div class="teleop-speed">
-            <button class="btn-speed" id="btnSpeedDown" type="button" title="Bajar velocidad 10% (tecla -)">&minus;</button>
-            <span class="speed-readout mono">speed <strong id="tSpeedVal">0.50</strong> &nbsp;&middot;&nbsp; turn <strong id="tTurnVal">1.00</strong></span>
-            <button class="btn-speed" id="btnSpeedUp" type="button" title="Subir velocidad 10% (tecla +)">+</button>
-          </div>
-          <button class="btn-estop" id="btnEstop" type="button">&#9632; E-STOP</button>
-          <p class="teleop-hint">WASD / Flechas &nbsp;&middot;&nbsp; +/&minus; velocidad &nbsp;&middot;&nbsp; Espacio = E-Stop</p>
-        </section>
-
-      </div><!-- /tab-teleop -->
-
-      <!-- ---- TAB: CAMERA ---- -->
-      <div class="tab-pane hidden" id="tab-camera">
-
-        <section class="card">
-          <h2 class="card-title">Live Camera Feed</h2>
-          <div class="feed-wrap">
-            <img
-              id="cameraFeed"
-              class="feed-img"
-              src="/video_feed"
-              alt="Live camera feed"
-              onerror="this.src='/video_feed'"
-            />
-          </div>
-        </section>
-
-      </div><!-- /tab-camera -->
-
-      <!-- ---- TAB: VOICE ---- -->
-      <div class="tab-pane hidden" id="tab-voice">
-
-        <section class="card">
-          <h2 class="card-title">Voice Commands</h2>
-
-          <div class="voice-btn-row">
-            <button class="btn-voice-record" id="btnVoiceRecord" type="button">
-              &#9679; Hold to Record
-            </button>
-          </div>
-
-          <div class="voice-status-row">
-            <span class="tele-label">Status</span>
-            <span class="voice-status" id="voiceStatus">Ready</span>
-          </div>
-
-          <div class="voice-result-box" id="voiceResultBox">
-            <span class="voice-result-label">Last word:</span>
-            <span class="voice-result-word mono accent" id="voiceResultWord">—</span>
-          </div>
-
-          <p class="teleop-hint" id="voiceModelStatus">Checking models…</p>
-        </section>
-
-        <section class="card">
-          <h2 class="card-title">Voice History</h2>
-          <ul class="history-list" id="voiceHistoryList">
-            <li class="dim">No commands yet</li>
-          </ul>
-        </section>
-
-        <section class="card">
-          <h2 class="card-title">Vocabulary</h2>
-          <div class="voice-vocab" id="voiceVocab">
-            <span class="dim">Loading…</span>
-          </div>
-        </section>
-
-      </div><!-- /tab-voice -->
-
-      <!-- ---- TAB: STATE MACHINE ---- -->
-      <div class="tab-pane hidden" id="tab-sm">
-
-        <section class="card">
-          <h2 class="card-title">SM State</h2>
-          <div class="tele-grid">
-            <span class="tele-label">Current</span>
-            <span class="tele-val mono accent" id="smCurrentState">—</span>
-            <span class="tele-label">Mission</span>
-            <span class="tele-val mono" id="smMissionId">—</span>
-            <span class="tele-label">Type</span>
-            <span class="tele-val mono" id="smMissionType">—</span>
-            <span class="tele-label">Candidate</span>
-            <span class="tele-val mono" id="smCurrentCandidate">—</span>
-            <span class="tele-label">QR</span>
-            <span class="tele-val mono" id="smQrValue">—</span>
-            <span class="tele-label">Dest</span>
-            <span class="tele-val mono" id="smResolvedDest">—</span>
-            <span class="tele-label">Queue</span>
-            <span class="tele-val mono" id="smCandidateQueue">—</span>
-          </div>
-        </section>
-
-        <section class="card">
-          <h2 class="card-title">Debug Controls</h2>
-          <div class="sm-btn-row">
-            <button class="btn-submit sm-btn" id="smBtnPause" type="button">&#10074;&#10074; Pause</button>
-            <button class="btn-submit sm-btn" id="smBtnResume" type="button">&#9654; Resume</button>
-          </div>
-          <div class="sm-btn-row">
-            <button class="btn-submit sm-btn" id="smBtnStep" type="button">&#10142; Step</button>
-            <button class="btn-cancel sm-btn" id="smBtnAbort" type="button">&#9632; Abort</button>
-          </div>
-          <label class="sm-toggle-row">
-            <input type="checkbox" id="smStepModeToggle" />
-            <span>Step mode (wait after every state)</span>
-          </label>
-          <div class="sm-force-row">
-            <label class="form-label" for="smForceSelect">Force outcome (one-shot)</label>
-            <div style="display:flex;gap:6px">
-              <select id="smForceSelect" class="form-select" style="flex:1">
-                <option value="">— select —</option>
-              </select>
-              <button class="btn-submit" id="smBtnForce" type="button">Send</button>
-            </div>
-            <p class="dim sm-hint" id="smWaitingHint"></p>
-          </div>
-        </section>
-
-        <section class="card">
-          <h2 class="card-title">Recent Transitions</h2>
-          <ul class="history-list" id="smTransitionLog">
-            <li class="dim">No transitions yet</li>
-          </ul>
-        </section>
-
-        <section class="card">
-          <h2 class="card-title">Blackboard (raw)</h2>
-          <pre class="sm-bb-json mono" id="smBlackboardJson">—</pre>
-        </section>
-
-      </div><!-- /tab-sm -->
+        </div>
+        <div class="teleop-speed">
+          <button class="btn-speed" id="btnSpeedDown" type="button" title="Bajar velocidad 10% (tecla -)">&minus;</button>
+          <span class="speed-readout mono">speed <strong id="tSpeedVal">0.50</strong> &nbsp;&middot;&nbsp; turn <strong id="tTurnVal">1.00</strong></span>
+          <button class="btn-speed" id="btnSpeedUp" type="button" title="Subir velocidad 10% (tecla +)">+</button>
+        </div>
+        <button class="btn-estop" id="btnEstop" type="button">&#9632; E-STOP</button>
+        <p class="teleop-hint">WASD / Flechas &nbsp;&middot;&nbsp; +/&minus; velocidad &nbsp;&middot;&nbsp; Espacio = E-Stop</p>
+      </section>
 
     </aside>
   </main>
@@ -416,8 +230,13 @@
       <p class="wp-popup-coords" id="wpCoords">x: 0.000 m, y: 0.000 m</p>
       <p class="wp-popup-coords" id="wpHeading">&theta;: 0.000 rad (0.0°)</p>
 
-      <label class="form-label">Name</label>
-      <input id="wpName" class="form-input" type="text" placeholder="e.g. truck_1, rack_2…" autocomplete="off" />
+      <label class="form-label">Type</label>
+      <div class="wp-type-group" id="wpTypeGroup">
+        <button type="button" class="wp-type-btn active" data-type="roller">Roller</button>
+        <button type="button" class="wp-type-btn" data-type="rack">Rack</button>
+        <button type="button" class="wp-type-btn" data-type="truck">Truck</button>
+      </div>
+      <p class="wp-popup-coords" id="wpNamePreview">Name: roller_1</p>
 
       <div class="wp-popup-actions">
         <button class="btn-submit" id="btnSaveWaypoint">&#10003; Save</button>
@@ -425,6 +244,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Global toast -->
+  <div id="toast" class="toast hidden"></div>
 
   <!-- ================================================================
        FOOTER

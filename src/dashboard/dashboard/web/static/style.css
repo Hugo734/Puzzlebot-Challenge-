@@ -439,48 +439,58 @@ body {
 .vel-bar-angular { background: linear-gradient(90deg, var(--accent2), #0088cc); }
 
 /* ===================================================================
-   LIFTER INDICATOR
+   LIFTER (4 levels, click to set)
    =================================================================== */
-.lifter-wrap {
+.lifter-btn-row {
   display: flex;
-  gap: 8px;
-  align-items: flex-end;
-  height: 140px;
-  margin-bottom: 8px;
+  gap: 6px;
 }
-
-.lifter-column {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  width: 32px;
-}
-
-.lifter-segment {
-  width: 32px;
-  height: 14px;
-  border-radius: 3px;
-  border: 1px solid var(--border);
+.lifter-btn {
+  flex: 1;
+  padding: 14px 0;
   background: var(--surface);
-  transition: all 0.2s;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--dim);
+  font-size: 1.1rem;
+  font-weight: 700;
+  font-family: var(--mono);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
 }
-
-.lifter-segment.active {
-  background: var(--accent);
+.lifter-btn:hover { border-color: var(--accent); color: var(--text); }
+.lifter-btn.active {
+  background: rgba(0,255,136,0.14);
   border-color: var(--accent);
-  box-shadow: 0 0 6px rgba(0,255,136,0.5);
+  color: var(--accent);
+  box-shadow: 0 0 8px rgba(0,255,136,0.4);
 }
+.lifter-text { font-size: 0.8rem; color: var(--dim); margin-top: 8px; }
 
-.lifter-labels {
+/* ===================================================================
+   QUICK CONTROL (one-click missions)
+   =================================================================== */
+.quick-control {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  font-size: 0.68rem;
-  color: var(--dim);
-  font-family: var(--mono);
+  gap: 8px;
 }
-.lifter-labels span { height: 14px; line-height: 14px; }
-.lifter-text { font-size: 0.8rem; color: var(--dim); margin-top: 4px; }
+.quick-btn {
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  font-family: var(--sans);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.quick-btn:hover { background: var(--panel); border-color: var(--accent); }
+.quick-btn-stop { color: var(--danger); border-color: #5a2030; }
+.quick-btn-stop:hover { background: rgba(255,77,109,0.12); border-color: var(--danger); }
 
 /* ===================================================================
    CAMERA FEED
@@ -870,6 +880,29 @@ body {
   padding: 5px 8px;
   text-align: center;
 }
+
+.wp-type-group {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.wp-type-btn {
+  flex: 1;
+  padding: 8px 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--dim);
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-family: var(--sans);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.wp-type-btn:hover { border-color: var(--accent); color: var(--text); }
+.wp-type-btn.active[data-type="roller"] { background: rgba(102,238,136,0.14); border-color: #66ee88; color: #66ee88; }
+.wp-type-btn.active[data-type="rack"]   { background: rgba(0,200,255,0.14);   border-color: #00c8ff; color: #00c8ff; }
+.wp-type-btn.active[data-type="truck"]  { background: rgba(255,209,102,0.14); border-color: #ffd166; color: #ffd166; }
 
 .wp-popup-actions {
   display: flex;

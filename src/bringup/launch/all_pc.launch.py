@@ -58,9 +58,9 @@ def generate_launch_description():
         'map_yaml', default_value=map_yaml_default,
         description=(
             'Path to saved map yaml. Default = ~/ros2_maps/warehouse.yaml so '
-            'SLAM preloads the existing map (instead of wiping it) and '
-            'nav_node has a fallback initial grid. Pass an empty string '
-            'to force a fresh empty grid.'
+            'in navigation mode SLAM preloads the existing map and localises '
+            'against it (instead of wiping it), and nav_node has a fallback '
+            'initial grid. Pass an empty string to force a fresh empty grid.'
         ),
     )
     rviz_arg = DeclareLaunchArgument(
@@ -90,11 +90,18 @@ def generate_launch_description():
     # /odom is remapped because the sole odometry source on real hw is now
     # real_odom (the duplicate-TF EKF was disabled), which publishes on
     # /puzzlebot_controller/odom.
+    # start_mode=navigation → slam loads map_yaml and localises against it
+    # WITHOUT rebuilding it (so a good saved map is not wiped); start_mode=
+    # mapping → fresh empty grid, build the map live.
     slam_node = TimerAction(period=1.5, actions=[Node(
         package='slam',
         executable='slam_node',
         name='slam_node',
-        parameters=[slam_params_path, {'use_sim_time': False}],
+        parameters=[slam_params_path, {
+            'use_sim_time': False,
+            'map_yaml':     map_yaml,
+            'start_mode':   start_mode,
+        }],
         remappings=[('/odom', '/puzzlebot_controller/odom')],
         output='screen',
         emulate_tty=True,

@@ -377,7 +377,11 @@ class QRQuadAlignmentNode(Node):
         self._pub_state.publish(s)
 
         if self._state in (State.IDLE, State.DONE, State.LOST):
-            self._publish_zero()
+            # Idle/finished: stay OFF the /cmd_vel_in bus so navigation owns it.
+            # We do NOT publish zero here every tick — that would fight nav_node
+            # while the robot is driving to a candidate/truck. The one-shot
+            # _publish_zero() in _set_state() already halts our own docking
+            # motion when we leave an active state.
             self._render_ui()
             return
         if self._state == State.SEARCH:

@@ -54,19 +54,14 @@ from yasmin import Blackboard, StateMachine
 
 from mission_control.debug_wrapper import DebugContext
 from mission_control.bb_helpers import bb_get
-from mission_control.mission_parser import load_zones
-from mission_control.states.align_to_pallet import AlignToPallet
+from mission_control.mission_parser import load_zones, derive_zones
 from mission_control.states.idle import Idle
-from mission_control.states.lift_pickup import LiftPickup
-from mission_control.states.lift_place import LiftPlace
 from mission_control.states.mission_done import MissionDone
 from mission_control.states.mission_failed import MissionFailed
-from mission_control.states.nav_to_candidate import NavToCandidate
-from mission_control.states.nav_to_destination import NavToDestination
-from mission_control.states.next_candidate import NextCandidate
-from mission_control.states.plan_mission import PlanMission
-from mission_control.states.resolve_destination import ResolveDestination
-from mission_control.states.scan_qr import ScanQR
+from mission_control.states.nav_to_truck import NavToTruck
+from mission_control.states.pick import Pick
+from mission_control.states.place import Place
+from mission_control.states.search import Search
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +82,7 @@ class StateMachineNode(Node):
 
         # ── Parameters ────────────────────────────────────────────────────
         self.declare_parameter("zones_file", "")
+        self.declare_parameter("waypoints_file", "~/ros2_maps/waypoints.yaml")
         self.declare_parameter("scan_qr_timeout", 4.0)
         self.declare_parameter("alignment_timeout", 30.0)
         self.declare_parameter("lifter_timeout", 8.0)
@@ -97,8 +93,25 @@ class StateMachineNode(Node):
             zones_path = os.path.join(
                 get_package_share_directory("mission_control"), "config", "zones.yaml"
             )
-        self._zones = load_zones(zones_path)
-        self.get_logger().info(f"Loaded zones from {zones_path}")
+        self._zones = load_zones(zones_path)         # qr_aliases (+ optional zones)
+        self.get_logger().info(f"Loaded qr_aliases from {zones_path}")
+
+        # Zone classification is derived from the actual waypoint names by prefix
+        # (roller_/rack_/truck_), so the dashboard's auto-named waypoints define
+        # the zones with zero manual sync. Falls back to any zones listed in
+        # zones.yaml if no waypoints file is found.
+        wp_path = str(self.get_parameter("waypoints_file").value)
+        wp_names = self._load_waypoint_names(wp_path)
+        if wp_names:
+            self._zones["zones"] = derive_zones(wp_names)
+            self.get_logger().info(
+                f"Derived zones from {len(wp_names)} waypoints in {wp_path}: "
+                f"{ {k: len(v) for k, v in self._zones['zones'].items()} }"
+            )
+        else:
+            self.get_logger().warning(
+                f"No waypoints found at {wp_path}; using zones from {zones_path} (may be empty)."
+            )
 
         scan_qr_timeout   = float(self.get_parameter("scan_qr_timeout").value)
         alignment_timeout = float(self.get_parameter("alignment_timeout").value)
@@ -168,6 +181,22 @@ class StateMachineNode(Node):
         bb["lifter_status"]       = None
         bb["voice_command"]       = None
         bb["mission_error_reason"] = None
+
+    # ------------------------------------------------------------------ waypoints
+    @staticmethod
+    def _load_waypoint_names(path: str) -> list[str]:
+        """Read waypoint names from a waypoints.yaml ({name: {x,y,theta}})."""
+        import yaml
+        path = os.path.expanduser(path)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            wps = data.get("waypoints", data)
+            return list(wps.keys()) if isinstance(wps, dict) else []
+        except FileNotFoundError:
+            return []
+        except Exception:  # noqa: BLE001
+            return []
 
     # ------------------------------------------------------------------ callbacks
     def _cb_mission(self, msg: String) -> None:
@@ -309,78 +338,47 @@ class StateMachineNode(Node):
         sm.add_state(
             "IDLE",
             Idle(self._debug, self._zones, **kw),
-            transitions={"mission_received": "PLAN_MISSION"},
+            transitions={"mission_received": "SEARCH"},
         )
+        # STEP 1 — buscar el pallet: navigate candidates in order, read the QR.
         sm.add_state(
-            "PLAN_MISSION",
-            PlanMission(self._debug, **kw),
-            transitions={"ok": "NAV_TO_CANDIDATE", "invalid": "MISSION_FAILED"},
-        )
-        sm.add_state(
-            "NAV_TO_CANDIDATE",
-            NavToCandidate(self._debug, self._publish_goal, **kw),
+            "SEARCH",
+            Search(self._debug, self._publish_goal, scan_qr_timeout, **kw),
             transitions={
-                "arrived": "SCAN_QR",
-                "stuck":   "NEXT_CANDIDATE",
-                "stop":    "MISSION_FAILED",
+                "found":     "PICK",
+                "not_found": "MISSION_FAILED",
+                "stop":      "MISSION_FAILED",
             },
         )
+        # STEP 2 — recoge: align to the pallet, then lift it.
         sm.add_state(
-            "SCAN_QR",
-            ScanQR(self._debug, scan_qr_timeout, **kw),
+            "PICK",
+            Pick(self._debug, self._publish_alignment_start, self._publish_lifter,
+                 alignment_timeout, lifter_timeout, **kw),
             transitions={
-                "qr_found":     "RESOLVE_DESTINATION",
-                "qr_not_found": "NEXT_CANDIDATE",
-                "stop":         "MISSION_FAILED",
+                "picked": "NAV_TO_TRUCK",
+                "failed": "MISSION_FAILED",
+                "stop":   "MISSION_FAILED",
             },
         )
+        # STEP 3 — navega al camión según el QR (resolve inline + drive).
         sm.add_state(
-            "NEXT_CANDIDATE",
-            NextCandidate(self._debug, **kw),
+            "NAV_TO_TRUCK",
+            NavToTruck(self._debug, self._publish_goal, self._zones, **kw),
             transitions={
-                "more":      "NAV_TO_CANDIDATE",
-                "exhausted": "MISSION_FAILED",
-            },
-        )
-        sm.add_state(
-            "RESOLVE_DESTINATION",
-            ResolveDestination(self._debug, self._zones, **kw),
-            transitions={"resolved": "ALIGN_TO_PALLET", "invalid": "MISSION_FAILED"},
-        )
-        sm.add_state(
-            "ALIGN_TO_PALLET",
-            AlignToPallet(self._debug, self._publish_alignment_start, alignment_timeout, **kw),
-            transitions={
-                "aligned": "LIFT_PICKUP",
+                "arrived": "PLACE",
                 "failed":  "MISSION_FAILED",
                 "stop":    "MISSION_FAILED",
             },
         )
+        # STEP 4 — deja: lower the lifter to release the pallet.
         sm.add_state(
-            "LIFT_PICKUP",
-            LiftPickup(self._debug, self._publish_lifter, lifter_timeout, **kw),
+            "PLACE",
+            Place(self._debug, self._publish_lifter, lifter_timeout, **kw),
             transitions={
-                "picked":      "NAV_TO_DESTINATION",
-                "lifter_fail": "MISSION_FAILED",
-                "stop":        "MISSION_FAILED",
-            },
-        )
-        sm.add_state(
-            "NAV_TO_DESTINATION",
-            NavToDestination(self._debug, self._publish_goal, **kw),
-            transitions={
-                "arrived": "LIFT_PLACE",
-                "stuck":   "MISSION_FAILED",
-                "stop":    "MISSION_FAILED",
-            },
-        )
-        sm.add_state(
-            "LIFT_PLACE",
-            LiftPlace(self._debug, self._publish_lifter, lifter_timeout, **kw),
-            transitions={
-                "placed":      "MISSION_DONE",
-                "lifter_fail": "MISSION_FAILED",
-                "stop":        "MISSION_FAILED",
+                "placed": "MISSION_DONE",
+                "failed": "MISSION_FAILED",
+                "stop":   "MISSION_FAILED",
             },
         )
         sm.add_state(
@@ -390,7 +388,7 @@ class StateMachineNode(Node):
         )
         sm.add_state(
             "MISSION_FAILED",
-            MissionFailed(self._debug, **kw),
+            MissionFailed(self._debug, self._publish_goal, self._publish_alignment_start, **kw),
             transitions={"ok": "IDLE"},
         )
 

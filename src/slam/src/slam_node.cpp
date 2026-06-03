@@ -28,6 +28,7 @@
 #include <chrono>
 #include <fstream>
 #include <string>
+#include <cstdlib>
 
 // Best-effort per-thread priority lowering (Linux). Keeps the back-end
 // optimiser from stealing CPU from the real-time front-end on the Nano.
@@ -50,6 +51,16 @@ static double yawFromQuat(const geometry_msgs::msg::Quaternion& q) {
   double siny = 2.0 * (q.w * q.z + q.x * q.y);
   double cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
   return std::atan2(siny, cosy);
+}
+
+// Expand a leading '~' to $HOME so map_yaml params like '~/ros2_maps/...'
+// resolve the same way the Python launch files (os.path.expanduser) do.
+static std::string expandUser(const std::string& p) {
+  if (!p.empty() && p[0] == '~') {
+    const char* home = std::getenv("HOME");
+    if (home) return std::string(home) + p.substr(1);
+  }
+  return p;
 }
 
 class SlamNode : public rclcpp::Node {
@@ -128,6 +139,13 @@ public:
     // Per-scan processing-time budget (ms).  At 10 Hz a scan must finish in
     // 100 ms; warn (throttled) past this so real-hardware overruns surface.
     scan_budget_ms_ = declare_parameter("scan_budget_ms", 80.0);
+    // ── Saved-map preload (localisation-only) ────────────────────────────
+    // start_mode=navigation|localization + a readable map_yaml → load the
+    // saved grid and localise against it WITHOUT ever rebuilding it.  This is
+    // the "I already mapped, now just navigate" flow.  start_mode=mapping
+    // (or an empty/unreadable map_yaml) → live mapping from a fresh grid.
+    std::string map_yaml   = declare_parameter("map_yaml", std::string(""));
+    std::string start_mode = declare_parameter("start_mode", std::string("mapping"));
 
     slam::AmclParams ap;
     ap.n_particles = declare_parameter("amcl_n_particles", 600);
@@ -157,9 +175,47 @@ public:
                 sx_, sy_, sth_ * 180.0 / M_PI,
                 amcl_->cudaActive() ? "[CUDA]" : "[CPU]");
 
+    // ── Optional: preload a saved map → LOCALISATION-ONLY ────────────────
+    // In navigation/localization mode, load the saved grid and localise
+    // against it without ever modifying it: the map-write path (maybeIntegrate)
+    // AND the graph back-end's map re-rasterise are both disabled, so a good
+    // saved map is never wiped by a fresh one.  If the file can't be read
+    // (e.g. first run, no map yet) we warn and fall back to live mapping so a
+    // fresh robot still builds a map.
+    const bool want_localize = (start_mode == "navigation" || start_mode == "localization");
+    if (want_localize && !map_yaml.empty()) {
+      std::string err, path = expandUser(map_yaml);
+      if (grid_->loadFromYaml(path, err)) {
+        localization_only_ = true;
+        map_path_       = path;
+        graph_en_       = false;   // no pose-graph/loop-closure map rebuild
+        bootstrap_done_ = true;    // map already established
+        first_write_    = false;
+        lmx_ = sx_; lmy_ = sy_; lmth_ = sth_;
+        RCLCPP_INFO(get_logger(),
+          "Loaded saved map '%s' (%d wall cells) — LOCALISATION-ONLY: the map "
+          "will NOT be modified. If the robot doesn't start at (%.2f, %.2f, %.0f°), "
+          "set its pose with RViz '2D Pose Estimate'.",
+          path.c_str(), grid_->countOccupied(), init_x_, init_y_, init_th_ * 180.0 / M_PI);
+      } else {
+        RCLCPP_WARN(get_logger(),
+          "start_mode=%s but could not load map '%s' (%s) — falling back to "
+          "LIVE MAPPING from an empty grid.",
+          start_mode.c_str(), map_yaml.c_str(), err.c_str());
+      }
+    } else if (!want_localize) {
+      RCLCPP_INFO(get_logger(), "start_mode=%s — LIVE MAPPING (fresh grid).",
+                  start_mode.c_str());
+    }
+
     // ── interfaces ──
     auto qos_scan = rclcpp::SensorDataQoS();
-    map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>("/map", 1);
+    // /map is latched (transient_local): a preloaded map and the live grid
+    // both survive for late joiners — nav/RViz/map_saver on the laptop get
+    // the last map immediately on connect instead of waiting for the next
+    // periodic republish (which matters most across WiFi).
+    map_pub_ = create_publisher<nav_msgs::msg::OccupancyGrid>(
+        "/map", rclcpp::QoS(1).transient_local());
     pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("/slam_pose", 10);
     parts_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/particle_cloud", 1);
     path_pub_ = create_publisher<nav_msgs::msg::Path>("/slam_path", 1);
@@ -202,6 +258,10 @@ public:
 
     RCLCPP_INFO(get_logger(), "SLAM (C++) started — %dx%d @ %.3f m/cell  (debug pubs: %s)",
                 mapw_, maph_, res_, publish_debug_ ? "on" : "off");
+
+    // Publish the preloaded map once so latched late-joiners (nav/RViz on the
+    // laptop) see it immediately, before the first scan triggers a republish.
+    if (localization_only_) publishMap(now());
   }
 
   ~SlamNode() override {
@@ -544,6 +604,7 @@ private:
 
   void maybeIntegrate(const Pose2& sp, const std::vector<float>& cx,
                       const std::vector<float>& cy, double map_fit) {
+    if (localization_only_) return;   // never modify a preloaded saved map
     bool moved = first_write_ ||
       std::hypot(sp.x - lmx_, sp.y - lmy_) >= min_dxy_ ||
       std::abs(wrap(sp.th - lmth_)) >= min_dth_;
@@ -596,6 +657,20 @@ private:
   void onReset(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                std::shared_ptr<std_srvs::srv::Trigger::Response> resp) {
     std::lock_guard<std::mutex> lk(mtx_);
+    // In localisation-only mode a "reset" must NOT wipe the saved map —
+    // reload it from disk instead so the known walls survive.
+    if (localization_only_) {
+      std::string err;
+      if (grid_->loadFromYaml(map_path_, err)) {
+        amcl_->initGaussian(sx_, sy_, sth_, init_sxy_, init_sth_);
+        resp->success = true; resp->message = "saved map reloaded, AMCL re-seeded";
+        RCLCPP_INFO(get_logger(), "Saved map reloaded (localisation mode), AMCL re-seeded.");
+      } else {
+        resp->success = false; resp->message = "map reload failed: " + err;
+        RCLCPP_WARN(get_logger(), "Reset ignored — map reload failed: %s", err.c_str());
+      }
+      return;
+    }
     grid_->reset();
     first_write_ = true;
     bootstrap_done_ = false;
@@ -707,6 +782,8 @@ private:
   double sx_=0, sy_=0, sth_=0;
   double tf_x_=0, tf_y_=0, tf_th_=0;
   double lmx_=0, lmy_=0, lmth_=0; bool first_write_=true; bool bootstrap_done_=false;
+  bool localization_only_=false;   // true → preloaded saved map, never modified
+  std::string map_path_;           // resolved saved-map yaml (localisation mode)
   double lx_=0, ly_=0, lyaw_=0; bool laser_ok_=false;
   int scan_count_=0;
 

@@ -37,23 +37,51 @@ import yaml
 MISSION_TYPES = ("ROLLER_TO_TRUCK", "RACK_TO_TRUCK", "CUSTOM")
 
 # Lifter levels per zone class. Override per mission via pickup_level/place_level.
+# Racks are a single class now (the level is decided at mission time, not baked
+# into the waypoint); the SPI HAL only reaches level 3 anyway.
 DEFAULT_PICKUP_LEVELS = {
-    "rollers":  1,
-    "racks_l1": 3,
-    "racks_l2": 5,
-    "trucks":   2,
+    "rollers": 1,
+    "racks":   3,
+    "trucks":  2,
 }
 DEFAULT_PLACE_LEVEL_TRUCK = 2
 
+# Map a waypoint-name prefix to its zone class. The dashboard auto-names
+# waypoints roller_N / rack_N / truck_N, so the class is derivable from the name
+# — no manual zone lists to keep in sync.
+_PREFIX_TO_CLASS = (
+    ("roller", "rollers"),
+    ("rack",   "racks"),
+    ("truck",  "trucks"),
+)
+
+
+def derive_zones(waypoint_names) -> dict:
+    """Group waypoint names into zone classes by name prefix.
+
+    Returns {'rollers': [...], 'racks': [...], 'trucks': [...]} sorted by name.
+    """
+    zones: dict = {"rollers": [], "racks": [], "trucks": []}
+    for name in sorted(waypoint_names):
+        for prefix, cls in _PREFIX_TO_CLASS:
+            if name.startswith(prefix):
+                zones[cls].append(name)
+                break
+    return zones
+
 
 def load_zones(yaml_path: str) -> dict:
-    """Load zones.yaml into a dict. Raises FileNotFoundError / yaml errors."""
+    """Load zones.yaml — only ``qr_aliases`` is required now.
+
+    Zone classification is derived from waypoint name prefixes (see
+    ``derive_zones``) and injected by the node; the file just holds the
+    QR-payload → truck mapping. A ``zones`` key is tolerated but optional.
+    """
     with open(yaml_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-    if "zones" not in data or "qr_aliases" not in data:
-        raise ValueError(
-            f"{yaml_path}: missing required top-level 'zones' or 'qr_aliases'"
-        )
+    if "qr_aliases" not in data:
+        raise ValueError(f"{yaml_path}: missing required top-level 'qr_aliases'")
+    data.setdefault("zones", {})
     return data
 
 
@@ -123,14 +151,10 @@ def parse_mission(json_str: str, zones_data: dict) -> Optional[dict]:
         )
 
     if mtype == "RACK_TO_TRUCK":
-        # Rack candidates can be a mix of l1 / l2; pickup_level adapts per
-        # candidate at execution time, so we accept the union here.
-        rack_pool = set(zones.get("racks_l1", [])) | set(zones.get("racks_l2", []))
         return _build_search_mission(
             data, zones, all_wps, mid,
-            zone_category=None,           # None ⇒ accept either rack subclass
-            default_pickup=DEFAULT_PICKUP_LEVELS["racks_l1"],
-            override_pool=rack_pool,
+            zone_category="racks",
+            default_pickup=DEFAULT_PICKUP_LEVELS["racks"],
         )
 
     # CUSTOM
@@ -147,28 +171,23 @@ def _build_search_mission(
     all_wps: set[str],
     mid: str,
     *,
-    zone_category: Optional[str],
+    zone_category: str,
     default_pickup: int,
-    override_pool: Optional[set[str]] = None,
 ) -> Optional[dict]:
     """Common builder for ROLLER_TO_TRUCK / RACK_TO_TRUCK."""
     src = data.get("source", {})
     if not isinstance(src, dict):
         return None
 
-    pool = override_pool if override_pool is not None else set(zones.get(zone_category, []))
+    ordered = list(zones.get(zone_category, []))
+    pool = set(ordered)
     if not pool:
         return None
 
     candidates_arg = src.get("candidates")
     if candidates_arg is None:
-        # Visit every candidate in the pool, in the yaml-declared order.
-        if override_pool is not None:
-            # Mixed-pool case (racks): l1 first, then l2.
-            ordered = list(zones.get("racks_l1", [])) + list(zones.get("racks_l2", []))
-        else:
-            ordered = list(zones.get(zone_category, []))
-        queue = deque(w for w in ordered if w in pool)
+        # Visit every candidate in the class, in name-sorted order.
+        queue = deque(ordered)
     else:
         if not isinstance(candidates_arg, list) or not candidates_arg:
             return None

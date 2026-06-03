@@ -14,13 +14,16 @@ Runs here, on the laptop:
   mission_control   — YASMIN state machine
   dashboard         — Flask + Socket.IO telemetry/web UI
   voice_control     — LPC + VQ recogniser (laptop microphone)
-  map_saver         — `/map_saver/save_map` Trigger → writes .pgm/.yaml
   robot_state_publisher + joint_state_publisher — local copy of the model/TF
   map_odom_relay    — rebuilds map->odom from /slam_pose
   rviz2             — visualisation (§7: RViz on the laptop, not the Nano)
 
 What it does NOT run (those live on the Jetson, via robot.launch.py):
-  rplidar driver, velocity_bridge, real_odom, vel_smoother, slam_node.
+  rplidar driver, velocity_bridge, real_odom, vel_smoother, slam_node,
+  map_saver.  The map_saver moved to the Jetson so `/map_saver/save_map`
+  writes the .pgm/.yaml where slam_node reloads it (no scp); the dashboard's
+  save button + MAPPING→NAVIGATION auto-save call that same global service
+  over WiFi.  Only ONE map_saver may own the service, so it is NOT here.
 
 The map, /scan, /odom and the Jetson's *static* TF all arrive over DDS/WiFi.
 We DO run robot_state_publisher + joint_state_publisher locally because the
@@ -114,16 +117,6 @@ def generate_launch_description():
         output='screen',
     )
 
-    # ── Map saver (subscribes /map from the Jetson) ───────────────────
-    map_saver_node = Node(
-        package='slam', executable='map_saver', name='map_saver',
-        parameters=[{
-            'use_sim_time': False,
-            'map_path':     os.path.splitext(map_yaml_default)[0],
-        }],
-        output='screen',
-    )
-
     # ── Robot model + TF (local) ──────────────────────────────────────
     # The Jetson's dynamic /tf does not cross WiFi reliably (movable joints +
     # slam map->odom), so we publish the full model locally.
@@ -162,6 +155,5 @@ def generate_launch_description():
         mission_node,
         dashboard_node,
         voice_node,
-        map_saver_node,
         rviz_node,
     ])

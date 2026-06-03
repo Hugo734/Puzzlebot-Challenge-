@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include "slam/se2.hpp"
 
 namespace slam {
@@ -33,6 +34,15 @@ public:
 
   // Serialise to ROS OccupancyGrid.data (int8): 100/0/-1.
   void toRosData(std::vector<int8_t>& out) const;
+
+  // Preload a saved nav2-format map (.yaml + .pgm) into the log grid, seeding
+  // occupied cells to l_max and free cells to l_min (unknown → 0).  The exact
+  // inverse of the map_saver writer.  Used for localisation against a known
+  // map: AMCL/ICP match these cells and (in localisation-only mode) the grid
+  // is never modified afterwards.  Returns false (and fills `err`) on any
+  // failure — missing file, unreadable PGM, or geometry mismatch with this
+  // grid (size/resolution/origin) — leaving the grid untouched.
+  bool loadFromYaml(const std::string& yaml_path, std::string& err);
 
   void reset();
 

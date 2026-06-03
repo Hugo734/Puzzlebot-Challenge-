@@ -13,9 +13,16 @@ Runs here, on the robot:
   controller/real       — velocity_bridge + real_odom + vel_smoother + RSP
                           (wheel odom for SLAM + base→lidar TF + cmd path)
   slam_node             — C++ front-end (GPU MCL) + back-end thread (graph
-                          + loop closure + re-mapping). Maps + localises LIVE
-                          and publishes /map continuously; nav on the laptop
-                          plans over that live grid (no save/reload needed).
+                          + loop closure + re-mapping). start_mode=navigation
+                          (default): loads the saved map (map_yaml) and
+                          LOCALISES against it without rebuilding it.
+                          start_mode=mapping: builds + publishes /map live.
+                          nav on the laptop plans over the published /map.
+  map_saver             — `/map_saver/save_map` Trigger → writes the .pgm/.yaml
+                          to THIS host's ~/ros2_maps/warehouse, the exact path
+                          slam_node reloads in navigation mode (so re-map →
+                          save → relaunch needs no scp). Lives here, NOT on the
+                          laptop (one node owns the /map_saver service).
   lifting_node          — FPGA lifter control over SPI (Tang Nano 20K on
                           /dev/spidev0.0). Subscribes /lifter_level (UInt8 0-3).
                           Must run on the Jetson — it owns the SPI hardware.
@@ -66,7 +73,25 @@ def generate_launch_description():
     slam_params_path    = os.path.join(pkg_slam, 'config', 'slam_params.yaml')
     lifting_params_path = os.path.join(pkg_lifting, 'config', 'lifting_params.yaml')
 
+    map_yaml_default = os.path.expanduser('~/ros2_maps/warehouse.yaml')
+
     # ── Args ──────────────────────────────────────────────────────────
+    # start_mode drives whether slam_node LOADS the saved map and only
+    # localises (navigation) or builds a fresh one (mapping).  Keep this in
+    # sync with the laptop.launch.py start_mode you pass on the other host.
+    start_mode_arg = DeclareLaunchArgument(
+        'start_mode', default_value='navigation',
+        description='mapping | navigation. navigation (default): slam_node '
+                    'loads map_yaml and localises against it WITHOUT rebuilding '
+                    'it (falls back to live mapping if the file is missing). '
+                    'mapping: build a fresh map from an empty grid.')
+    map_yaml_arg = DeclareLaunchArgument(
+        'map_yaml', default_value=map_yaml_default,
+        description='Saved map yaml slam_node localises against in navigation '
+                    'mode. Pass map_yaml:="" to always map fresh.')
+    start_mode = LaunchConfiguration('start_mode')
+    map_yaml   = LaunchConfiguration('map_yaml')
+
     scan_time_offset_arg = DeclareLaunchArgument(
         'scan_time_offset', default_value='0.10',
         description='Seconds subtracted from /scan stamps to compensate the '
@@ -111,21 +136,44 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(pkg_controller, 'launch', 'real.launch.py')))
 
-    # ── 2. SLAM core: live mapping + localisation ──────────────────────
+    # ── 2. SLAM core: localisation (navigation) or live mapping ────────
     # Front-end (GPU MCL) + back-end thread (graph/loop-closure/re-mapping).
-    # Always maps live and publishes /map; /odom is the local real_odom topic.
-    # Short delay so RSP + real_odom are up before the first scan is consumed.
+    # start_mode=navigation → load map_yaml and localise WITHOUT rebuilding it
+    # (the back-end map-rebuild + map-write are disabled in that mode);
+    # start_mode=mapping → fresh empty grid, build + publish /map live.
+    # /odom is the local real_odom topic.  Short delay so RSP + real_odom are
+    # up before the first scan is consumed.
     slam_node = TimerAction(period=1.5, actions=[Node(
         package='slam', executable='slam_node', name='slam_node',
         parameters=[slam_params_path, {
             'use_sim_time':     False,
             'scan_time_offset': scan_time_offset,
+            'map_yaml':         map_yaml,
+            'start_mode':       start_mode,
         }],
         remappings=[('/odom', '/puzzlebot_controller/odom')],
         output='screen', emulate_tty=True,
     )])
 
-    # ── 3. Lifter (FPGA over SPI) ──────────────────────────────────────
+    # ── 3. Map saver (lives WHERE slam loads the map) ──────────────────
+    # Runs on the Jetson so the `/map_saver/save_map` Trigger (called manually
+    # or auto-fired by the dashboard on MAPPING→NAVIGATION) writes the .pgm/
+    # .yaml to THIS host's ~/ros2_maps/warehouse — exactly the path slam_node
+    # reloads on the next navigation launch.  That closes the loop: re-map →
+    # save → relaunch localises on the new map, with no scp to the Jetson.
+    # It subscribes to the LOCAL /map (no WiFi), so saves are reliable.
+    # (Keep it OFF the laptop — two `map_saver` nodes would clash on the
+    # service name.  Waypoints still save on the laptop via the dashboard.)
+    map_saver_node = Node(
+        package='slam', executable='map_saver', name='map_saver',
+        parameters=[{
+            'use_sim_time': False,
+            'map_path':     os.path.splitext(map_yaml_default)[0],
+        }],
+        output='screen',
+    )
+
+    # ── 4. Lifter (FPGA over SPI) ──────────────────────────────────────
     # Owns /dev/spidev0.0 → Tang Nano 20K. Independent of SLAM, no delay.
     lifting_node = Node(
         package='lifting', executable='lifting_node', name='lifting_node',
@@ -135,11 +183,14 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        start_mode_arg,
+        map_yaml_arg,
         scan_time_offset_arg,
         bridge_laser_frame_arg,
         use_lifter_arg,
         laser_frame_bridge,
         controller_launch,
         slam_node,
+        map_saver_node,
         lifting_node,
     ])

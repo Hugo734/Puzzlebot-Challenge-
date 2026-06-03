@@ -100,8 +100,14 @@ class RosBridge:
         self._node.create_subscription(
             UInt8, "/lifter_status", self._cb_lifter, best_effort_qos
         )
+        # Camera topic is configurable: the real robot typically publishes
+        # /video_source/raw, while Gazebo sim uses /mast_camera/image_raw.
+        # Default targets the real camera; override with the `camera_topic` param.
+        self._node.declare_parameter("camera_topic", "/video_source/raw")
+        camera_topic = str(self._node.get_parameter("camera_topic").value)
+        self._node.get_logger().info(f"Camera feed subscribed on {camera_topic}")
         self._node.create_subscription(
-            Image, "/cam_img", self._cb_image, best_effort_qos
+            Image, camera_topic, self._cb_image, best_effort_qos
         )
         self._node.create_subscription(
             OccupancyGrid, "/map", self._cb_map, best_effort_qos
@@ -115,6 +121,7 @@ class RosBridge:
 
         self._mission_pub = self._node.create_publisher(String, "/mission", reliable_qos)
         self._goal_pub = self._node.create_publisher(String, "/goal_waypoint", reliable_qos)
+        self._lifter_pub = self._node.create_publisher(UInt8, "/lifter_level", reliable_qos)
         self._cmd_vel_pub = self._node.create_publisher(Twist, "/cmd_vel_in", reliable_qos)
         self._voice_pub = self._node.create_publisher(String, "/voice_command", reliable_qos)
         self._sm_control_pub = self._node.create_publisher(String, "/sm/control", reliable_qos)
@@ -228,6 +235,14 @@ class RosBridge:
         msg.data = word
         self._voice_pub.publish(msg)
 
+    def publish_lifter_level(self, level: int) -> None:
+        """Publish a target lifter level to /lifter_level (clamped 0-7; the
+        lifting node further clamps to the active HAL's range)."""
+        from std_msgs.msg import UInt8
+        msg = UInt8()
+        msg.data = max(0, min(7, int(level)))
+        self._lifter_pub.publish(msg)
+
     def get_sm_snapshot(self) -> Optional[dict]:
         with self._lock:
             return dict(self._sm_snapshot) if self._sm_snapshot is not None else None
@@ -260,6 +275,30 @@ class RosBridge:
     def get_waypoints(self) -> dict:
         """Return the waypoints dict {name: {x, y, theta}}."""
         return dict(self._waypoints)
+
+    def add_typed_waypoint(self, wtype: str, x: float, y: float, theta: float) -> str:
+        """Add a waypoint with an auto-assigned name based on its type.
+
+        The name follows the ``<type>_<n>`` convention (roller_1, rack_2,
+        truck_3) that the rest of the stack already keys off (map colours,
+        zone classification). The next index is computed under the lock so two
+        near-simultaneous saves can't pick the same name. Only geometry
+        (x, y, theta) is persisted — the type stays encoded in the name prefix,
+        keeping waypoints.yaml compatible with nav_node's loader.
+
+        Returns the assigned waypoint name.
+        """
+        import re
+        with self._lock:
+            pattern = re.compile(rf"^{re.escape(wtype)}_(\d+)$")
+            max_n = 0
+            for key in self._waypoints:
+                m = pattern.match(key)
+                if m:
+                    max_n = max(max_n, int(m.group(1)))
+            name = f"{wtype}_{max_n + 1}"
+        self.add_waypoint(name, x, y, theta)
+        return name
 
     def add_waypoint(self, name: str, x: float, y: float, theta: float) -> None:
         """Add or update a waypoint and persist to the YAML file."""

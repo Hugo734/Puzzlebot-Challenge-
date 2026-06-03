@@ -135,18 +135,13 @@ def get_state():
 # Outcomes per state — used by the front-end to populate the Force-outcome
 # dropdown and by the server to reject malformed requests.
 _SM_OUTCOMES = {
-    "IDLE":                ["mission_received"],
-    "PLAN_MISSION":        ["ok", "invalid"],
-    "NAV_TO_CANDIDATE":    ["arrived", "stuck", "stop"],
-    "SCAN_QR":             ["qr_found", "qr_not_found", "stop"],
-    "NEXT_CANDIDATE":      ["more", "exhausted"],
-    "RESOLVE_DESTINATION": ["resolved", "invalid"],
-    "ALIGN_TO_PALLET":     ["aligned", "failed", "stop"],
-    "LIFT_PICKUP":         ["picked", "lifter_fail", "stop"],
-    "NAV_TO_DESTINATION":  ["arrived", "stuck", "stop"],
-    "LIFT_PLACE":          ["placed", "lifter_fail", "stop"],
-    "MISSION_DONE":        ["ok"],
-    "MISSION_FAILED":      ["ok"],
+    "IDLE":           ["mission_received"],
+    "SEARCH":         ["found", "not_found", "stop"],
+    "PICK":           ["picked", "failed", "stop"],
+    "NAV_TO_TRUCK":   ["arrived", "failed", "stop"],
+    "PLACE":          ["placed", "failed", "stop"],
+    "MISSION_DONE":   ["ok"],
+    "MISSION_FAILED": ["ok"],
 }
 
 _SM_VALID_ACTIONS = {
@@ -361,23 +356,43 @@ def get_waypoints():
     return jsonify({"waypoints": result})
 
 
+VALID_WAYPOINT_TYPES = {"roller", "rack", "truck"}
+
+
 @app.route("/api/waypoints", methods=["POST"])
 def add_waypoint():
-    """Add or update a waypoint and persist to YAML."""
+    """Add a waypoint and persist to YAML.
+
+    Two request shapes are accepted:
+      - {"type": "rack"|"truck"|"roller", x, y, theta}  → the server assigns
+        the next free name for that type (rack_1, truck_2, …) and returns it.
+        This is what the map modal sends.
+      - {"name": "...", x, y, theta}                     → legacy explicit name.
+    """
     if ros_bridge is None:
         return jsonify({"error": "ROS bridge not initialised"}), 503
     body = request.get_json(silent=True) or {}
-    name = (body.get("name") or "").strip()
-    if not name:
-        return jsonify({"error": "name is required"}), 400
     try:
         x = float(body.get("x", 0.0))
         y = float(body.get("y", 0.0))
         theta = float(body.get("theta", 0.0))
     except (TypeError, ValueError):
         return jsonify({"error": "x, y, theta must be numbers"}), 400
+
+    wtype = (body.get("type") or "").strip().lower()
+    if wtype:
+        if wtype not in VALID_WAYPOINT_TYPES:
+            return jsonify({
+                "error": f"type must be one of {sorted(VALID_WAYPOINT_TYPES)}",
+            }), 400
+        name = ros_bridge.add_typed_waypoint(wtype, x, y, theta)
+        return jsonify({"ok": True, "name": name})
+
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "type or name is required"}), 400
     ros_bridge.add_waypoint(name, x, y, theta)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "name": name})
 
 
 @app.route("/api/waypoints/<name>", methods=["DELETE"])
@@ -406,6 +421,26 @@ def send_goal():
 
     ros_bridge.publish_goal(waypoint)
     return jsonify({"ok": True})
+
+
+@app.route("/api/lifter", methods=["POST"])
+def set_lifter():
+    """Set the lifter target level. Body: {"level": 0..3}.
+
+    The robot's SPI HAL (Tang Nano) only reaches levels 0-3, so the UI and this
+    endpoint cap there even though the message field allows 0-7.
+    """
+    if ros_bridge is None:
+        return jsonify({"error": "ROS bridge not initialised"}), 503
+    body = request.get_json(silent=True) or {}
+    try:
+        level = int(body.get("level"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "level must be an integer 0-3"}), 400
+    if not (0 <= level <= 3):
+        return jsonify({"error": "level must be 0-3"}), 400
+    ros_bridge.publish_lifter_level(level)
+    return jsonify({"ok": True, "level": level})
 
 
 @app.route("/api/teleop", methods=["POST"])
