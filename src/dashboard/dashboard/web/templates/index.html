@@ -271,8 +271,13 @@
               <span class="tele-val mono" id="tVelAngular">0.00</span>
             </div>
           </div>
+          <div class="teleop-speed">
+            <button class="btn-speed" id="btnSpeedDown" type="button" title="Bajar velocidad 10% (tecla -)">&minus;</button>
+            <span class="speed-readout mono">speed <strong id="tSpeedVal">0.50</strong> &nbsp;&middot;&nbsp; turn <strong id="tTurnVal">1.00</strong></span>
+            <button class="btn-speed" id="btnSpeedUp" type="button" title="Subir velocidad 10% (tecla +)">+</button>
+          </div>
           <button class="btn-estop" id="btnEstop" type="button">&#9632; E-STOP</button>
-          <p class="teleop-hint">WASD / Arrow Keys &nbsp;&middot;&nbsp; Space = E-Stop</p>
+          <p class="teleop-hint">WASD / Flechas &nbsp;&middot;&nbsp; +/&minus; velocidad &nbsp;&middot;&nbsp; Espacio = E-Stop</p>
         </section>
 
       </div><!-- /tab-teleop -->

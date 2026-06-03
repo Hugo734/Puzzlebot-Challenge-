@@ -683,6 +683,44 @@ body {
 .key-spacer { width: 42px; height: 42px; }
 
 /* ===================================================================
+   TELEOP SPEED CONTROL
+   =================================================================== */
+.teleop-speed {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 12px 0 4px;
+}
+.btn-speed {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 1.2rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.12s;
+  user-select: none;
+}
+.btn-speed:hover  { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 8px rgba(0,255,136,0.25); }
+.btn-speed:active { transform: scale(0.94); }
+.speed-readout {
+  font-size: 0.82rem;
+  color: var(--dim);
+  letter-spacing: 0.02em;
+  min-width: 150px;
+  text-align: center;
+}
+.speed-readout strong { color: var(--accent); font-weight: 700; }
+
+/* ===================================================================
    E-STOP
    =================================================================== */
 .btn-estop {

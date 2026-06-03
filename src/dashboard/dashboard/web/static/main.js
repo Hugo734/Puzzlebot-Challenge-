@@ -8,8 +8,18 @@ const MAX_LINEAR_VEL  = 0.5;
 const MAX_ANGULAR_VEL = 2.0;
 const MAX_HISTORY     = 20;
 
-const TELEOP_LINEAR  = 0.18;
-const TELEOP_ANGULAR = 0.9;
+// Teleop velocities — start at teleop_twist_keyboard's defaults (speed 0.5,
+// turn 1.0) and are adjustable in ±10% steps with the on-screen +/- buttons or
+// the +/- keys, exactly like teleop_twist_keyboard. A full WASD press commands
+// `_teleopSpeed` m/s linear and `_teleopTurn` rad/s angular.
+let _teleopSpeed = 0.5;   // m/s  (linear)
+let _teleopTurn  = 1.0;   // rad/s (angular)
+const TELEOP_STEP_UP    = 1.1;   // +key → ×1.1 (≈ +10%)
+const TELEOP_STEP_DOWN  = 0.9;   // -key → ×0.9 (≈ -10%), matches teleop_twist_keyboard
+const TELEOP_MIN_SPEED  = 0.05;
+const TELEOP_MAX_SPEED  = 1.0;
+const TELEOP_MIN_TURN   = 0.1;
+const TELEOP_MAX_TURN   = 3.0;
 
 // Map world-space parameters — updated dynamically from /api/map/info
 let MAP_ORIGIN_X   = -10.0;  // m
@@ -772,10 +782,10 @@ function _isInputFocused() {
 
 function _computeTeleopVelocities() {
   let linear = 0, angular = 0;
-  if (_keysDown.has('w') || _keysDown.has('arrowup'))    linear  += TELEOP_LINEAR;
-  if (_keysDown.has('s') || _keysDown.has('arrowdown'))  linear  -= TELEOP_LINEAR;
-  if (_keysDown.has('a') || _keysDown.has('arrowleft'))  angular += TELEOP_ANGULAR;
-  if (_keysDown.has('d') || _keysDown.has('arrowright')) angular -= TELEOP_ANGULAR;
+  if (_keysDown.has('w') || _keysDown.has('arrowup'))    linear  += _teleopSpeed;
+  if (_keysDown.has('s') || _keysDown.has('arrowdown'))  linear  -= _teleopSpeed;
+  if (_keysDown.has('a') || _keysDown.has('arrowleft'))  angular += _teleopTurn;
+  if (_keysDown.has('d') || _keysDown.has('arrowright')) angular -= _teleopTurn;
   return {linear, angular};
 }
 
@@ -806,11 +816,30 @@ function _highlightKeys() {
   });
 }
 
+function _updateSpeedReadout() {
+  setText('tSpeedVal', _teleopSpeed.toFixed(2));
+  setText('tTurnVal',  _teleopTurn.toFixed(2));
+}
+
+function _adjustTeleopSpeed(factor) {
+  // Scale linear and angular together by `factor`, clamped to sane bounds —
+  // same behaviour as teleop_twist_keyboard's q/z keys.
+  _teleopSpeed = Math.min(TELEOP_MAX_SPEED, Math.max(TELEOP_MIN_SPEED, _teleopSpeed * factor));
+  _teleopTurn  = Math.min(TELEOP_MAX_TURN,  Math.max(TELEOP_MIN_TURN,  _teleopTurn  * factor));
+  _updateSpeedReadout();
+  // If a movement key is held, reflect the new speed on the bars right away.
+  const {linear, angular} = _computeTeleopVelocities();
+  updateTeleopBars(linear, angular);
+}
+
 function initTeleop() {
   document.addEventListener('keydown', (e) => {
     if (_isInputFocused()) return;
     const key = e.key.toLowerCase();
     if (key === ' ') { e.preventDefault(); triggerEstop(); return; }
+    // Speed adjust (+/-) — both linear and angular, ±10% per press.
+    if (key === '+' || key === '=') { e.preventDefault(); _adjustTeleopSpeed(TELEOP_STEP_UP);   return; }
+    if (key === '-' || key === '_') { e.preventDefault(); _adjustTeleopSpeed(TELEOP_STEP_DOWN); return; }
     const valid = new Set(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright']);
     if (!valid.has(key)) return;
     e.preventDefault();
@@ -831,6 +860,9 @@ function initTeleop() {
   });
 
   document.getElementById('btnEstop')?.addEventListener('click', triggerEstop);
+  document.getElementById('btnSpeedUp')?.addEventListener('click',   () => _adjustTeleopSpeed(TELEOP_STEP_UP));
+  document.getElementById('btnSpeedDown')?.addEventListener('click', () => _adjustTeleopSpeed(TELEOP_STEP_DOWN));
+  _updateSpeedReadout();
 }
 
 function triggerEstop() {
@@ -842,8 +874,8 @@ function triggerEstop() {
 }
 
 function updateTeleopBars(linear, angular) {
-  const linPct = Math.min(Math.abs(linear) / TELEOP_LINEAR * 50, 50);
-  const angPct = Math.min(Math.abs(angular) / TELEOP_ANGULAR * 50, 50);
+  const linPct = Math.min(Math.abs(linear) / _teleopSpeed * 50, 50);
+  const angPct = Math.min(Math.abs(angular) / _teleopTurn  * 50, 50);
   const tBarL  = document.getElementById('tBarLinear');
   const tBarA  = document.getElementById('tBarAngular');
   if (tBarL) { tBarL.style.width = linPct + '%'; tBarL.style.left = linear  >= 0 ? '50%' : (50 - linPct) + '%'; }

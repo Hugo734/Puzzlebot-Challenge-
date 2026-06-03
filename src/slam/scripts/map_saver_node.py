@@ -14,16 +14,21 @@ class MapSaverNode(Node):
     def __init__(self):
         super().__init__('map_saver')
         self.declare_parameter('map_path', os.path.expanduser('~/ros2_maps/warehouse'))
+        # auto_save OFF by default: auto-saving the live /map on Ctrl+C would
+        # clobber a good saved map with whatever's live at shutdown (e.g. a
+        # fresh/empty grid right after a slam restart). Save explicitly instead.
+        self.declare_parameter('auto_save', False)
 
         self._latest_map: OccupancyGrid | None = None
         self.create_subscription(OccupancyGrid, '/map', self._map_cb, 1)
         self.create_service(Trigger, '~/save_map', self._save_cb)
 
         save_path = self.get_parameter('map_path').value
+        auto = bool(self.get_parameter('auto_save').value)
         self.get_logger().info(
             f'MapSaver ready — maps will be saved to {save_path}.pgm / .yaml\n'
             f'  Trigger manually:  ros2 service call /map_saver/save_map std_srvs/srv/Trigger {{}}\n'
-            f'  Auto-save:         Ctrl+C on this node'
+            f'  Auto-save on Ctrl+C: {"ON" if auto else "OFF (set auto_save:=true to enable)"}'
         )
 
     def _map_cb(self, msg: OccupancyGrid):
@@ -94,7 +99,7 @@ class MapSaverNode(Node):
         self.get_logger().info(f'  {yaml_path}')
 
     def destroy_node(self):
-        if self._latest_map is not None:
+        if self._latest_map is not None and bool(self.get_parameter('auto_save').value):
             path = self.get_parameter('map_path').value
             self.get_logger().info('Auto-saving map on shutdown…')
             try:
