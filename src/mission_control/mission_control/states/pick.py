@@ -1,11 +1,14 @@
 """PICK — mission step 2: dock onto the pallet, then a timed pick maneuver.
 
-Sequence (open-loop, time-based):
+Sequence:
     1. QR alignment (qr_quad_alignment docking) to centre on the pallet.
     2. Set the lifter to ``entry_level`` (fork height to slide under the pallet).
-    3. Drive forward for ``forward_time`` s to get the forks under the pallet.
+    3. Creep forward, stopping by VISION (Electric-80 logo at target distance,
+       /approach_stop/should_stop) before contact — with wheel stall + a
+       ``forward_time`` time limit as safety fallbacks.
     4. Set the lifter to ``lift_level`` to take the pallet's weight.
     5. Drive backward for ``reverse_time`` s to pull the pallet clear.
+    6. Set the lifter to ``transport_level`` (carry height) — then done.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from yasmin import Blackboard
 from mission_control.debug_wrapper import DebuggableState, DebugContext
 from mission_control.bb_helpers import bb_get
 from mission_control.states._actions import (
-    run_alignment, drive_for_time, drive_until_stall, drive_lifter,
+    run_alignment, drive_for_time, drive_until_approach_stop, drive_lifter,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +53,9 @@ class Pick(DebuggableState):
         stall_grace: float,
         stall_speed: float,
         stall_ticks: int,
+        vision_stop: bool,
+        vision_fresh_s: float,
+        transport_level: int,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -69,6 +75,9 @@ class Pick(DebuggableState):
         self._stall_grace = float(stall_grace)
         self._stall_speed = float(stall_speed)
         self._stall_ticks = int(stall_ticks)
+        self._vision_stop = bool(vision_stop)
+        self._vision_fresh = float(vision_fresh_s)
+        self._transport_level = int(transport_level)
 
     def run(self, blackboard: Blackboard) -> str:
         mission = bb_get(blackboard, "current_mission") or {}
@@ -96,13 +105,18 @@ class Pick(DebuggableState):
         if outcome == "timeout":
             return "failed"
 
-        # --- 3) drive forward into the pallet: stop as soon as the wheels stall
-        #         (blocked by the pallet) or the time limit is hit — both count
-        #         as "reached" so the motor driver isn't left stalling. ---
-        if drive_until_stall(self._debug, blackboard, self._publish_cmd,
-                             self._drive_speed, 0.0, self._forward_time,
-                             grace=self._stall_grace, stall_speed=self._stall_speed,
-                             stall_ticks=self._stall_ticks, tag="PICK fwd") == "stop":
+        # --- 3) creep forward toward the pallet: stop by VISION (Electric-80
+        #         logo at target distance) BEFORE touching the load, so the
+        #         motor never stalls into it and browns out the Jetson. Wheel
+        #         stall and the time limit remain as safety fallbacks. ---
+        if drive_until_approach_stop(
+                self._debug, blackboard, self._publish_cmd,
+                self._drive_speed, 0.0, self._forward_time,
+                grace=self._stall_grace, stall_speed=self._stall_speed,
+                stall_ticks=self._stall_ticks,
+                vision_enabled=self._vision_stop,
+                vision_fresh_s=self._vision_fresh,
+                tag="PICK fwd") == "stop":
             return "stop"
 
         # --- 4) lift the pallet (change to lift level) ---
@@ -120,5 +134,15 @@ class Pick(DebuggableState):
                           -self._drive_speed, 0.0, self._reverse_time,
                           tag="PICK rev") == "stop":
             return "stop"
+
+        # --- 6) raise the lifter to the transport level before finishing ---
+        outcome = drive_lifter(
+            self._debug, blackboard, self._publish_lifter,
+            self._transport_level, self._lifter_timeout, tag="PICK transport",
+        )
+        if outcome == "stop":
+            return "stop"
+        if outcome == "timeout":
+            return "failed"
 
         return "done" if mission.get("pick_only") else "picked"

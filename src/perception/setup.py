@@ -21,10 +21,11 @@ setup(
             os.path.join('share', package_name, 'launch'),
             glob(os.path.join('launch', '*launch.[pxy][yma]*')),
         ),
-        # config files
+        # config files (yaml params + reference images)
         (
             os.path.join('share', package_name, 'config'),
-            glob(os.path.join('config', '*.yaml')),
+            glob(os.path.join('config', '*.yaml'))
+            + glob(os.path.join('config', '*.png')),
         ),
     ],
     install_requires=['setuptools'],
@@ -40,6 +41,8 @@ setup(
         'console_scripts': [
             'camera_calibration = perception.camera_calibration:main',
             'qr_quad_alignment = perception.qr_quad_alignment:main',
+            'approach_stop_debug = perception.approach_stop_debug:main',
+            'logo_stop_debug = perception.logo_stop_debug:main',
         ],
     },
 )

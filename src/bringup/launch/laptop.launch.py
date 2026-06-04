@@ -55,9 +55,11 @@ def generate_launch_description():
     pkg_nav  = get_package_share_directory('navigation')
     pkg_desc = get_package_share_directory('description')
     pkg_perc = get_package_share_directory('perception')
+    pkg_mc   = get_package_share_directory('mission_control')
 
     nav_params_path     = os.path.join(pkg_nav,  'config', 'nav_params.yaml')
     camera_params_path  = os.path.join(pkg_perc, 'config', 'camera_params.yaml')
+    sm_params_path      = os.path.join(pkg_mc,   'config', 'sm_params.yaml')
     rviz_cfg_path    = os.path.join(pkg_slam, 'config', 'slam.rviz')
     urdf_path        = os.path.join(pkg_desc, 'urdf', 'puzzlebot_with_lifter.urdf.xacro')
 
@@ -82,18 +84,21 @@ def generate_launch_description():
         'rviz', default_value='true',
         description='Launch RViz2 with the SLAM config.')
     qr_arg = DeclareLaunchArgument(
-        'qr', default_value='true',
-        description='Launch qr_quad_alignment (PICK docking + dashboard QR camera feed).')
+        'qr', default_value='false',
+        description='Launch qr_quad_alignment HERE on the laptop. Default false: '
+                    'it now runs on the Jetson (robot.launch.py) so the docking '
+                    'control loop reads the camera locally with no WiFi lag. Set '
+                    'true only to fall back to laptop-side docking.')
     qr_dry_run_arg = DeclareLaunchArgument(
         'qr_dry_run', default_value='false',
         description='Run qr_quad_alignment WITHOUT driving /cmd_vel_in '
                     '(search-only testing; PICK docking needs false).')
     qr_dock_dist_arg = DeclareLaunchArgument(
-        'qr_dock_dist', default_value='0.30',
+        'qr_dock_dist', default_value='0.33',
         description='DOCK stop distance to the QR in metres (height-agnostic). '
-                    'Default 0.30 = roller pallet (QR seen at ~295 mm when docked). '
-                    'Set 0.0 for legacy pixel-cy mode (the low rack QR). Read the '
-                    'live "d=..mm" in the dashboard QR feed to retune.')
+                    'Calibrated 2026-06-03 at the ideal dock pose: dist_qr=330mm. '
+                    'Set 0.0 for legacy pixel-cy mode. Read the live "d=..mm" in '
+                    'the dashboard QR feed to retune.')
 
     start_mode = LaunchConfiguration('start_mode')
     map_yaml   = LaunchConfiguration('map_yaml')
@@ -111,10 +116,14 @@ def generate_launch_description():
     )
 
     # ── Mission control ───────────────────────────────────────────────
+    # IMPORTANT: load sm_params.yaml here. Without it the node falls back to the
+    # in-code defaults (pick_approach_speed 0.10 instead of the tuned 0.04 — the
+    # creep then races past the logo vision-stop and rams the load), and none of
+    # the PICK tuning (creep speed, reverse time, vision-stop, dock) applies.
     mission_node = Node(
         package='mission_control', executable='state_machine_node',
         name='state_machine_node',
-        parameters=[{'use_sim_time': False}],
+        parameters=[sm_params_path, {'use_sim_time': False}],
         output='screen',
     )
 
@@ -142,6 +151,9 @@ def generate_launch_description():
             'show_window':         False,
             'publish_debug_image': True,
             'dock_target_dist':    ParameterValue(LaunchConfiguration('qr_dock_dist'), value_type=float),
+            # Calibrated at the ideal dock pose (QR right-of-centre at ideal).
+            'target_cx_px':        173.0,
+            'target_cy_px':        187.0,
         }],
         output='screen',
         condition=IfCondition(LaunchConfiguration('qr')),

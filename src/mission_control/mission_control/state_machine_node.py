@@ -97,6 +97,7 @@ class StateMachineNode(Node):
         self.declare_parameter("pick_reverse_time", 10.0)      # s backing out
         self.declare_parameter("pick_entry_level", 1)          # fork height to enter
         self.declare_parameter("pick_lift_level", 0)           # height to lift the pallet
+        self.declare_parameter("pick_transport_level", 1)      # lifter height after backing out
         # Stall detection for the forward-into-pallet move: stop the instant the
         # wheels can't turn (robot blocked by the pallet) so the motor driver
         # isn't left drawing stall current. Stall = wheel speed (/wl,/wr rad/s)
@@ -104,6 +105,14 @@ class StateMachineNode(Node):
         self.declare_parameter("pick_stall_grace", 1.0)        # s spin-up before checking
         self.declare_parameter("pick_stall_speed", 0.4)        # rad/s — below = stalled
         self.declare_parameter("pick_stall_ticks", 3)          # consecutive ticks to confirm
+        # VISION stop for the forward creep: stop when the Electric-80 logo
+        # detector (perception/logo_stop_debug → /approach_stop/should_stop)
+        # says the load is at the target distance, BEFORE contact. This is the
+        # brownout fix — stall above is only the fallback. pick_vision_fresh_s
+        # = max age of the should_stop signal we trust (ignore a frozen value
+        # from a dead detector).
+        self.declare_parameter("pick_vision_stop", True)
+        self.declare_parameter("pick_vision_fresh_s", 1.0)
         # Front-distance TELEMETRY only (shown in the dashboard; does NOT gate
         # the timed maneuver). Front arc + LiDAR mount yaw select the front rays.
         self.declare_parameter("pick_front_arc_deg", 12.0)
@@ -146,9 +155,12 @@ class StateMachineNode(Node):
         pick_reverse_time      = float(self.get_parameter("pick_reverse_time").value)
         pick_entry_level       = int(self.get_parameter("pick_entry_level").value)
         pick_lift_level        = int(self.get_parameter("pick_lift_level").value)
+        pick_transport_level   = int(self.get_parameter("pick_transport_level").value)
         pick_stall_grace       = float(self.get_parameter("pick_stall_grace").value)
         pick_stall_speed       = float(self.get_parameter("pick_stall_speed").value)
         pick_stall_ticks       = int(self.get_parameter("pick_stall_ticks").value)
+        pick_vision_stop       = bool(self.get_parameter("pick_vision_stop").value)
+        pick_vision_fresh_s    = float(self.get_parameter("pick_vision_fresh_s").value)
         self._pick_front_arc   = _math.radians(float(self.get_parameter("pick_front_arc_deg").value))
         self._laser_yaw_offset = _math.radians(float(self.get_parameter("laser_yaw_offset_deg").value))
         self._pick_front_min_range = float(self.get_parameter("pick_front_min_range").value)
@@ -179,6 +191,11 @@ class StateMachineNode(Node):
         self._wr = 0.0
         self.create_subscription(Float32, "/wl", self._cb_wl, qos_profile_sensor_data)
         self.create_subscription(Float32, "/wr", self._cb_wr, qos_profile_sensor_data)
+        # Vision stop signal for the PICK forward creep (logo_stop_debug on the
+        # Jetson). Best-effort for freshest delivery over WiFi (the detector's
+        # RELIABLE publisher is compatible with a BEST_EFFORT subscription).
+        self.create_subscription(Bool, "/approach_stop/should_stop",
+                                 self._cb_approach_stop, qos_profile_sensor_data)
 
         self._pub_goal       = self.create_publisher(String, "/goal_waypoint",   qos)
         self._pub_cmd        = self.create_publisher(Twist,  "/cmd_vel_in",      qos)
@@ -201,6 +218,9 @@ class StateMachineNode(Node):
             pick_stall_grace=pick_stall_grace,
             pick_stall_speed=pick_stall_speed,
             pick_stall_ticks=pick_stall_ticks,
+            pick_vision_stop=pick_vision_stop,
+            pick_vision_fresh_s=pick_vision_fresh_s,
+            pick_transport_level=pick_transport_level,
         )
         self._sm.set_start_state("IDLE")
 
@@ -234,6 +254,10 @@ class StateMachineNode(Node):
         bb["mission_error_reason"] = None
         bb["front_distance"]       = None    # min front-arc LiDAR range (m), telemetry
         bb["wheel_speed"]          = None    # max |wheel| rad/s, for PICK stall detection
+        # Vision stop for the PICK creep, stored as ONE tuple (should_stop, stamp)
+        # so the boolean and its monotonic timestamp are always read consistently
+        # across the executor and SM threads (no torn read of two separate keys).
+        bb["approach_stop_signal"] = None
 
     # ------------------------------------------------------------------ waypoints
     @staticmethod
@@ -314,6 +338,14 @@ class StateMachineNode(Node):
         self._wr = float(msg.data)
         self._blackboard["wheel_speed"] = max(abs(self._wl), abs(self._wr))
 
+    def _cb_approach_stop(self, msg: Bool) -> None:
+        """Vision stop for the PICK creep (logo at target distance).
+
+        Written as a single (should_stop, stamp) tuple so a reader in the SM
+        thread can never see a fresh bool paired with a stale timestamp.
+        """
+        self._blackboard["approach_stop_signal"] = (bool(msg.data), time.monotonic())
+
     def _cb_voice(self, msg: String) -> None:
         cmd = msg.data.strip().lower()
         self._blackboard["voice_command"] = cmd
@@ -393,6 +425,7 @@ class StateMachineNode(Node):
         mission = bb.get("current_mission")
         queue = bb.get("candidate_queue")
         ae = bb.get("alignment_error")
+        sig = bb.get("approach_stop_signal")
         return {
             "state":              self._current_state_name,
             "mission_id":         (mission or {}).get("id"),
@@ -409,6 +442,8 @@ class StateMachineNode(Node):
             "voice_command":      bb.get("voice_command"),
             "front_distance":     bb.get("front_distance"),   # min front-arc LiDAR range (m)
             "wheel_speed":        bb.get("wheel_speed"),      # max |wheel| rad/s (stall sense)
+            "approach_should_stop": (sig[0] if sig else None),  # vision PICK stop
+
             "mission_error_reason": bb.get("mission_error_reason"),
             "debug":              self._debug.snapshot(),
         }
@@ -427,6 +462,9 @@ class StateMachineNode(Node):
         pick_stall_grace: float,
         pick_stall_speed: float,
         pick_stall_ticks: int,
+        pick_vision_stop: bool,
+        pick_vision_fresh_s: float,
+        pick_transport_level: int,
     ) -> StateMachine:
         sm = StateMachine(outcomes=["finish"])
         kw = dict(
@@ -457,7 +495,8 @@ class StateMachineNode(Node):
                  self._publish_cmd, alignment_timeout, lifter_timeout,
                  pick_approach_speed, pick_forward_time, pick_reverse_time,
                  pick_entry_level, pick_lift_level,
-                 pick_stall_grace, pick_stall_speed, pick_stall_ticks, **kw),
+                 pick_stall_grace, pick_stall_speed, pick_stall_ticks,
+                 pick_vision_stop, pick_vision_fresh_s, pick_transport_level, **kw),
             transitions={
                 "picked": "NAV_TO_TRUCK",
                 "done":   "MISSION_DONE",     # PICK_ONLY test ends here

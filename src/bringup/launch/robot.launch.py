@@ -63,15 +63,18 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    pkg_controller = get_package_share_directory('controller')
-    pkg_slam       = get_package_share_directory('slam')
-    pkg_lifting    = get_package_share_directory('lifting')
+    pkg_controller  = get_package_share_directory('controller')
+    pkg_slam        = get_package_share_directory('slam')
+    pkg_lifting     = get_package_share_directory('lifting')
+    pkg_perception  = get_package_share_directory('perception')
 
     slam_params_path    = os.path.join(pkg_slam, 'config', 'slam_params.yaml')
     lifting_params_path = os.path.join(pkg_lifting, 'config', 'lifting_params.yaml')
+    camera_params_path  = os.path.join(pkg_perception, 'config', 'camera_params.yaml')
 
     map_yaml_default = os.path.expanduser('~/ros2_maps/warehouse.yaml')
 
@@ -119,6 +122,38 @@ def generate_launch_description():
     use_lifter_arg = DeclareLaunchArgument(
         'use_lifter', default_value='true',
         description='Start the FPGA lifter node (SPI to the Tang Nano 20K).')
+
+    # Logo-based PICK approach stop (perception/logo_stop_debug). Runs HERE so
+    # the camera->stop decision has NO WiFi latency — the brownout fix: stop by
+    # vision BEFORE crashing into the load instead of drive_until_stall. It
+    # publishes /approach_stop/should_stop + /approach_stop/debug_image. Headless
+    # on the Jetson; view the annotated image on the laptop with rqt_image_view.
+    # Set logo_stop:=false to skip it (frees CPU on the 2 GB Nano when not
+    # picking).
+    logo_stop_arg = DeclareLaunchArgument(
+        'logo_stop', default_value='true',
+        description='Start the Electric-80 logo stop detector for the PICK '
+                    'final approach (vision stop). false = do not start it.')
+
+    # QR docking (qr_quad_alignment) runs HERE on the Jetson now (was on the
+    # laptop): the docking control loop reads the camera + encoders LOCALLY, so
+    # the pixel/distance feedback has no WiFi latency — the lag is what made the
+    # laptop-side dock overshoot and crash into the load. The laptop SM only
+    # sends /alignment_start and reads /alignment_state (small, latency-tolerant).
+    # Disable on the laptop with qr:=false there to avoid two nodes fighting on
+    # /cmd_vel_in.
+    qr_arg = DeclareLaunchArgument(
+        'qr', default_value='true',
+        description='Run qr_quad_alignment (PICK docking) on the Jetson.')
+    qr_dry_run_arg = DeclareLaunchArgument(
+        'qr_dry_run', default_value='false',
+        description='Run qr_quad_alignment WITHOUT driving /cmd_vel_in (testing).')
+    qr_dock_dist_arg = DeclareLaunchArgument(
+        'qr_dock_dist', default_value='0.33',
+        description='DOCK stop distance to the QR in metres (height-agnostic). '
+                    '0.0 = legacy pixel-cy mode. Calibrated 2026-06-03 at the '
+                    'ideal dock pose: dist_qr=330mm, cx=173px, cy=187px (40/40 '
+                    'detections). Read the live "d=..mm" in the dashboard to retune.')
 
     laser_frame_bridge = Node(
         package='tf2_ros',
@@ -182,15 +217,76 @@ def generate_launch_description():
         output='screen',
     )
 
+    # ── 5. QR docking (local camera → no WiFi lag) ─────────────────────
+    # Delayed 2 s so the camera + encoders are up. Headless (dashboard shows
+    # /qr_quad_alignment/debug_image). dock_target_dist makes the stop distance
+    # height-agnostic (works after lowering the QR).
+    qr_node = TimerAction(period=2.0, actions=[Node(
+        package='perception', executable='qr_quad_alignment', name='qr_quad_alignment',
+        parameters=[{
+            'use_sim_time':        False,
+            'image_topic':         '/video_source/raw',
+            'camera_params':       camera_params_path,
+            'marker_length':       0.05,
+            'dry_run':             ParameterValue(LaunchConfiguration('qr_dry_run'), value_type=bool),
+            'show_window':         False,
+            'publish_debug_image': True,
+            'dock_target_dist':    ParameterValue(LaunchConfiguration('qr_dock_dist'), value_type=float),
+            # Calibrated at the ideal dock pose (the QR sits right-of-centre, so
+            # the old target_cx_px=160 never met tol and DOCK never reached DONE).
+            'target_cx_px':        173.0,
+            'target_cy_px':        187.0,
+        }],
+        condition=IfCondition(LaunchConfiguration('qr')),
+        output='screen', emulate_tty=True,
+    )])
+
+    # ── 6. Logo stop detector (vision PICK approach stop) ──────────────
+    # Delayed 3 s so it does not steal CPU from slam_node's MCL init on the
+    # Nano. Calibrated defaults: template-only (mode 2), stop at apparent
+    # scale 0.90 (before the reference distance ≈ contact, for margin).
+    # Tune via stop_scale/match_thr; lower process_hz if CPU-bound.
+    logo_stop_node = TimerAction(period=3.0, actions=[Node(
+        package='perception', executable='logo_stop_debug', name='logo_stop_debug',
+        parameters=[{
+            'show_window':   False,
+            'image_topic':   '/video_source/raw',
+            'qos':           'sensor_data',
+            'process_hz':    12.0,
+            'mode':          2,
+            # Stop well BEFORE the reference distance for margin: scales are
+            # searched in 0.05 steps; 1.00 = reference ≈ contact, so 0.90 fires
+            # two steps early (more clearance so the slow detector/creep never
+            # rams the load → no brownout).
+            'stop_scale':    0.90,
+            'match_thr':     0.45,
+            'hold_frames':   4,
+            # ROI = bottom half only. The load's logo sits in the lower frame at
+            # stop distance; the upper frame holds the rack POSTER (which also
+            # carries E80 logos). Including it let a far/background logo match at
+            # high scale → false "DONE while far". Excluding it kills that.
+            'roi_top_pct':   50,
+            'publish_debug': True,
+        }],
+        condition=IfCondition(LaunchConfiguration('logo_stop')),
+        output='screen', emulate_tty=True,
+    )])
+
     return LaunchDescription([
         start_mode_arg,
         map_yaml_arg,
         scan_time_offset_arg,
         bridge_laser_frame_arg,
         use_lifter_arg,
+        logo_stop_arg,
+        qr_arg,
+        qr_dry_run_arg,
+        qr_dock_dist_arg,
         laser_frame_bridge,
         controller_launch,
         slam_node,
         map_saver_node,
         lifting_node,
+        logo_stop_node,
+        qr_node,
     ])

@@ -176,6 +176,100 @@ def drive_until_stall(
         publish_cmd(0.0, 0.0)
 
 
+def drive_until_approach_stop(
+    debug: DebugContext,
+    blackboard: Blackboard,
+    publish_cmd: Callable[[float, float], None],
+    v: float,
+    w: float,
+    max_duration: float,
+    *,
+    grace: float,
+    stall_speed: float,
+    stall_ticks: int,
+    vision_enabled: bool,
+    vision_fresh_s: float,
+    tag: str,
+) -> str:
+    """Creep into the load, stopping by VISION before contact, with the wheel
+    stall and the time limit as safety fallbacks.
+
+    This is the brownout fix for the PICK forward approach: the old path only
+    stopped once the wheels stalled — i.e. once the robot had already crashed
+    into the roller/pallet, and that stall-current spike is what browns out the
+    Jetson's powerbank. Here the Electric-80 logo detector (perception/
+    logo_stop_debug, on the Jetson) publishes /approach_stop/should_stop; the SM
+    mirrors it into blackboard['approach_stop_signal'] as a (should_stop, stamp)
+    tuple. We stop the instant that fires, BEFORE touching the load.
+
+    Stop priority (all terminal outcomes mean the step succeeded):
+      1. 'vision'  — approach_stop_signal True, fresher than ``vision_fresh_s``,
+                     AND stamped after this creep began (only when
+                     ``vision_enabled``). The brownout-safe path: stop before
+                     contact.
+      2. 'stalled' — wheels below ``stall_speed`` for ``stall_ticks`` ticks after
+                     the ``grace`` spin-up. Fallback if the logo isn't seen
+                     (detector off/occluded) — still ends the move on contact so
+                     the driver isn't left stalling.
+      3. 'timeout' — ``max_duration`` elapsed. Last-resort fallback.
+      4. 'stop'    — abort raised.
+
+    A stale True from a dead detector is ignored (freshness + stamp>=t0 gates) so
+    we don't stop short on a frozen or pre-creep signal; with no fresh vision we
+    degrade to the original stall/timeout behaviour. Always sends a zero on exit.
+    """
+    t0 = time.monotonic()
+    deadline = t0 + max_duration
+    grace_until = t0 + grace
+    stalled = 0
+    logger.info("[%s] creep v=%.3f for <=%.1fs (vision_stop=%s, fallback stall < "
+                "%.2f rad/s)", tag, v, max_duration, vision_enabled, stall_speed)
+    try:
+        while True:
+            if debug.aborted:
+                return "stop"
+            debug.wait_if_paused()
+            publish_cmd(v, w)
+            now = time.monotonic()
+
+            # 1) Vision stop (primary) — stop BEFORE contact. Only honour a
+            #    signal that ARRIVED AFTER this creep began (stamp >= t0): that
+            #    ignores a stale True left over from the docking phase or a
+            #    previous PICK (which would otherwise return on tick 1 without
+            #    the robot ever moving), and requires a fresh confirmation that
+            #    the logo is at target NOW. The Jetson twist_relay guard still
+            #    cuts forward physically on any fresh True, so the few mm before
+            #    that confirmation can't crash the robot.
+            if vision_enabled:
+                sig = bb_get(blackboard, "approach_stop_signal")
+                if sig is not None:
+                    should_stop, stamp = sig
+                    if should_stop and stamp >= t0 and (now - stamp) <= vision_fresh_s:
+                        logger.info("[%s] VISION stop — logo at target distance, "
+                                    "halting before contact.", tag)
+                        return "vision"
+
+            # 2) Wheel stall (fallback) — only after the spin-up grace.
+            if now >= grace_until:
+                ws = bb_get(blackboard, "wheel_speed")
+                if ws is not None and abs(ws) < stall_speed:
+                    stalled += 1
+                    if stalled >= stall_ticks:
+                        logger.info("[%s] wheels stalled (%.2f rad/s) — blocked "
+                                    "(vision fallback), step reached.", tag, ws)
+                        return "stalled"
+                else:
+                    stalled = 0
+
+            # 3) Time limit (fallback).
+            if now >= deadline:
+                logger.info("[%s] reached time limit %.1fs.", tag, max_duration)
+                return "timeout"
+            time.sleep(POLL_INTERVAL)
+    finally:
+        publish_cmd(0.0, 0.0)
+
+
 def run_alignment(
     debug: DebugContext,
     blackboard: Blackboard,

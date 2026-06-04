@@ -10,11 +10,13 @@ Outputs:
   /cmd_vel                        Twist       → hackerboard micro_ros agent
   puzzlebot_controller/cmd_vel    TwistStamped → simple_controller (sim)
 """
+import time
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Twist, TwistStamped
-from std_msgs.msg import Float32
+from std_msgs.msg import Bool, Float32
 
 
 class VelSmoother(Node):
@@ -36,7 +38,8 @@ class VelSmoother(Node):
         self.declare_parameter("stall_guard",        True)
         self.declare_parameter("stall_lin_thresh",   0.03)  # m/s — only guard real moves
         self.declare_parameter("stall_wheel_thresh", 0.4)   # rad/s — absolute floor for "stalled"
-        self.declare_parameter("stall_time",         0.08)  # s of stall before cutting (fast)
+        self.declare_parameter("stall_time",         0.12)  # s below floor (AFTER moving) before cutting
+        self.declare_parameter("stall_start_timeout",1.0)   # s allowed to spin up before "blocked from start"
         self.declare_parameter("stall_release",      0.02)  # m/s target below which we unblock
         # Partial-stall detection: pushing a pallet often lets the wheels CREEP
         # (turn slow but not zero) while drawing high current — the absolute
@@ -45,6 +48,26 @@ class VelSmoother(Node):
         # implies (expected = |cur_lin| / wheel_radius rad/s).
         self.declare_parameter("wheel_radius",       0.05)  # m
         self.declare_parameter("stall_fraction",     0.5)   # cut if wheel < this × expected
+
+        # ── Vision approach-stop guard ───────────────────────────────────
+        # Local safety reflex for the PICK forward approach: when the Electric-
+        # 80 logo detector (perception/logo_stop_debug, SAME host) reports the
+        # load is at the target distance (/approach_stop/should_stop True), cut
+        # FORWARD linear motion AT ONCE — on the Jetson, no WiFi round-trip — so
+        # the robot is already stopped in the right spot before the laptop's
+        # state machine even reacts. Prevents the motor from pressing into the
+        # load and browning out the Jetson. Reverse + rotation pass through (so
+        # it can still back out with the pallet). The stall guard above stays as
+        # a second-line fallback. Disable with approach_stop_guard:=false (e.g.
+        # if it ever interferes with navigation near a logo'd surface).
+        self.declare_parameter("approach_stop_guard", True)
+        self.declare_parameter("approach_stop_topic", "/approach_stop/should_stop")
+        # Keep this in sync with mission_control's pick_vision_fresh_s (both 1.0s):
+        # if the relay's window were shorter, a detector that goes silent mid-creep
+        # would let the relay resume forward while the laptop SM still believes the
+        # vision stop is active — a loss-of-guard window. (A fresh False clears the
+        # cut immediately; this only bounds how long a stuck True survives silence.)
+        self.declare_parameter("approach_stop_fresh", 1.0)   # s — ignore a stale signal
 
         max_lin = self.get_parameter("max_linear_accel").value
         max_ang = self.get_parameter("max_angular_accel").value
@@ -61,11 +84,21 @@ class VelSmoother(Node):
         self._stall_release   = float(self.get_parameter("stall_release").value)
         self._wheel_radius    = float(self.get_parameter("wheel_radius").value)
         self._stall_fraction  = float(self.get_parameter("stall_fraction").value)
+        self._stall_start_to  = float(self.get_parameter("stall_start_timeout").value)
         self._wl = 0.0
         self._wr = 0.0
         self._stall_t = 0.0
+        self._drive_t = 0.0
+        self._was_moving = False
         self._blocked = False
         self._stall_dir = 1.0
+
+        self._approach_guard = bool(self.get_parameter("approach_stop_guard").value)
+        self._approach_topic = str(self.get_parameter("approach_stop_topic").value)
+        self._approach_fresh = float(self.get_parameter("approach_stop_fresh").value)
+        self._approach_stop = False
+        self._approach_stop_t = 0.0
+        self._approach_logged = False
 
         self._cur_lin = 0.0
         self._cur_ang = 0.0
@@ -86,6 +119,12 @@ class VelSmoother(Node):
         # on the Jetson by velocity_bridge, so this stays low-latency.
         self.create_subscription(Float32, "/wl", self._wl_cb, sub_qos)
         self.create_subscription(Float32, "/wr", self._wr_cb, sub_qos)
+
+        # Vision approach-stop signal (logo_stop_debug, local on the Jetson →
+        # loopback, no WiFi). BEST_EFFORT sub accepts the detector's RELIABLE pub.
+        if self._approach_guard:
+            self.create_subscription(
+                Bool, self._approach_topic, self._approach_cb, sub_qos)
 
         # Match the QoS the perception/navigation nodes used before so the
         # hackerboard micro_ros agent sees identical message characteristics.
@@ -116,6 +155,17 @@ class VelSmoother(Node):
     def _wr_cb(self, msg: Float32) -> None:
         self._wr = float(msg.data)
 
+    def _approach_cb(self, msg: Bool) -> None:
+        self._approach_stop = bool(msg.data)
+        self._approach_stop_t = time.monotonic()
+
+    def _approach_cut(self) -> bool:
+        """True while the logo detector says the load is at the target distance
+        (signal fresh). Used to block FORWARD motion only."""
+        if not self._approach_guard or not self._approach_stop:
+            return False
+        return (time.monotonic() - self._approach_stop_t) <= self._approach_fresh
+
     def _update_stall_guard(self) -> None:
         """Latch _blocked when commanding linear motion but the wheels are
         stalled; release when the commander backs off or reverses."""
@@ -123,25 +173,40 @@ class VelSmoother(Node):
             return
         wheel = max(abs(self._wl), abs(self._wr))
         driving = abs(self._cur_lin) > self._stall_lin_thr
-        # Stall = wheels below the absolute floor OR below a fraction of the
-        # speed the command implies (catches "creeping under heavy load").
+        # Stall floor: absolute OR a fraction of the speed the command implies
+        # (catches "creeping under heavy load").
         expected = abs(self._cur_lin) / self._wheel_radius if self._wheel_radius > 0 else 0.0
         stall_floor = max(self._stall_wheel_thr, self._stall_fraction * expected)
-        if driving and wheel < stall_floor:
-            self._stall_t += self._dt
-            if self._stall_t >= self._stall_time and not self._blocked:
+
+        if not driving:
+            self._was_moving = False
+            self._drive_t = 0.0
+            self._stall_t = 0.0
+        else:
+            self._drive_t += self._dt
+            if wheel >= stall_floor:
+                self._was_moving = True          # spin-up confirmed — don't false-cut the ramp
+            if self._was_moving:
+                # Was moving then dropped below the floor → real stall.
+                self._stall_t = self._stall_t + self._dt if wheel < stall_floor else 0.0
+                hit = self._stall_t >= self._stall_time
+            else:
+                # Never got moving despite commanding → blocked from the start.
+                hit = self._drive_t >= self._stall_start_to
+            if hit and not self._blocked:
                 self._blocked = True
                 self._stall_dir = 1.0 if self._cur_lin >= 0.0 else -1.0
                 self.get_logger().warn(
-                    f"Stall guard: wheels loaded/blocked (wheel={wheel:.2f} < "
-                    f"{stall_floor:.2f} rad/s) — cutting linear cmd.")
-        else:
-            self._stall_t = 0.0
+                    f"Stall guard: wheels blocked (wheel={wheel:.2f} < "
+                    f"{stall_floor:.2f} rad/s, moved={self._was_moving}) — cutting linear cmd.")
+
         # Release when the commander stops pushing in the stalled direction.
         if self._blocked and (abs(self._tgt_lin) < self._stall_release
                               or self._tgt_lin * self._stall_dir < 0.0):
             self._blocked = False
             self._stall_t = 0.0
+            self._drive_t = 0.0
+            self._was_moving = False
             self.get_logger().info("Stall guard: released.")
 
     @staticmethod
@@ -156,8 +221,22 @@ class VelSmoother(Node):
     def _update(self) -> None:
         self._update_stall_guard()
 
+        # Vision approach-stop: cut FORWARD before contact (pre-emptive, beats
+        # the stall guard which only fires after the wheels are already blocked).
+        logo_stop = self._approach_cut()
+        if logo_stop and not self._approach_logged:
+            self.get_logger().warn(
+                "Approach-stop guard: logo at target — blocking FORWARD cmd "
+                "(reverse/rotate still allowed).")
+            self._approach_logged = True
+        elif not logo_stop and self._approach_logged:
+            self.get_logger().info("Approach-stop guard: released.")
+            self._approach_logged = False
+
         if self._blocked:
             self._cur_lin = 0.0   # hard cut — fastest relief from stall current
+        elif logo_stop and self._tgt_lin > 0.0:
+            self._cur_lin = 0.0   # vision pre-contact stop — block forward only
         else:
             self._cur_lin = self._ramp(
                 self._cur_lin, self._tgt_lin, self._max_lin_accel * self._dt)
