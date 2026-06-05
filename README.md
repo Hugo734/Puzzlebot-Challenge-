@@ -107,4 +107,8 @@ ros2 launch puzzlebot_description week1.launch.py
 | `circular_motion.py` | Moves the robot in a circle (radius 0.5 m) and spins the wheels |
 | `rviz2` | Visualizes the robot with `odom` as the fixed frame |
 
-<video src="video/video_Robot.mp4" controls width="600"></video>
+
+
+https://github.com/user-attachments/assets/9404006e-5014-4b8f-bb71-3c55d2a86a8f
+
+
