@@ -109,6 +109,6 @@ ros2 launch puzzlebot_description week1.launch.py
 
 
 
-https://github.com/user-attachments/assets/9404006e-5014-4b8f-bb71-3c55d2a86a8f
+[![Puzzlebot Demo](https://img.youtube.com/vi/AEM72Lx7E6k/0.jpg)](https://youtube.com/shorts/AEM72Lx7E6k)
 
 
