@@ -106,3 +106,5 @@ ros2 launch puzzlebot_description week1.launch.py
 | `robot_state_publisher` | Loads the URDF and publishes the robot TF tree |
 | `circular_motion.py` | Moves the robot in a circle (radius 0.5 m) and spins the wheels |
 | `rviz2` | Visualizes the robot with `odom` as the fixed frame |
+
+<video src="video/video_Robot.mp4" controls width="600"></video>
